@@ -32,6 +32,9 @@ DATA_DIR = Path(os.environ.get("DATA_DIR") or (BASE / "data"))
 TEMPLATES = Jinja2Templates(directory=str(BASE / "templates"))
 
 def _session_secret() -> str:
+    env = (os.environ.get("SESSION_SECRET") or "").strip()
+    if env:
+        return env
     secret_file = DATA_DIR / "session_secret.txt"
     if secret_file.exists():
         return secret_file.read_text().strip()
