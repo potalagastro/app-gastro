@@ -26,20 +26,25 @@
 
   <!-- ORDINI -->
   <section id="page-ordini" class="page active">
-    <div class="card search-bar">
-      <span class="ico">🔍</span>
-      <input id="search-q" type="search" placeholder="Cerca prodotto (es. zuc)…" enterkeyhint="search"/>
+    <div id="ordini-home">
+      <div class="card search-bar">
+        <span class="ico">🔍</span>
+        <input id="search-q" type="search" placeholder="Cerca prodotto (es. zuc)…" enterkeyhint="search" autocomplete="off"/>
+      </div>
+      <div id="search-results" class="card hidden"></div>
+
+      <div class="section-title">Scegli fornitore</div>
+      <div id="supplier-btns" class="supplier-grid"><div class="empty">Caricamento…</div></div>
+
+      <div class="section-title">Bozze e storico</div>
+      <div id="orders-list" class="card"><div class="empty">Caricamento…</div></div>
     </div>
-    <div id="search-results" class="card hidden"></div>
 
-    <div class="section-title">Fornitori</div>
-    <div id="supplier-chips" class="row" style="margin-bottom:10px;overflow:auto;flex-wrap:nowrap;padding-bottom:4px"></div>
-    <div id="supplier-panel" class="card hidden"></div>
-
-    <div class="section-title">Bozze e storico</div>
-    <div id="orders-list" class="card"><div class="empty">Caricamento…</div></div>
-
+    <div id="supplier-panel" class="hidden"></div>
     <div id="order-detail" class="hidden"></div>
+    <div id="draft-fab" class="fab-bar hidden">
+      <button class="btn btn-primary btn-block" id="btn-fab-draft">Vedi bozza</button>
+    </div>
   </section>
 
   <!-- FOOD COST -->
@@ -86,7 +91,11 @@
   {% endif %}
 
   <script>
-    window.PLG = { isAdmin: {{ 'true' if is_admin else 'false' }}, userName: {{ user.full_name|tojson }} };
+    window.PLG = {
+      isAdmin: {{ 'true' if is_admin else 'false' }},
+      userName: {{ user.full_name|tojson }},
+      userId: {{ user.id }}
+    };
   </script>
   <script src="/static/app.js"></script>
 </body>

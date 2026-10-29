@@ -25,7 +25,7 @@ from .auth import (
 )
 from .catalog_import import CSV_PATH, import_catalog
 from .db import DB_PATH, db, init_db
-from .foodcost import compute_recipe_cost, scale_ingredients
+from .foodcost import compute_recipe_cost, scale_ingredients, ingredient_cost
 
 BASE = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("DATA_DIR") or (BASE / "data"))
@@ -285,7 +285,36 @@ def api_search(request: Request, q: str = "", supplier_id: int | None = None, al
             sql += " AND (p.description LIKE ? OR p.code LIKE ? OR s.name LIKE ?)"
             like = f"%{q}%"
             params.extend([like, like, like])
-        sql += " ORDER BY p.description LIMIT 80"
+        # Wide list when browsing one supplier; keep search results capped otherwise
+        limit = 5000 if supplier_id else 80
+        sql += f" ORDER BY p.description COLLATE NOCASE LIMIT {limit}"
+        rows = conn.execute(sql, params).fetchall()
+    return ok([dict(r) for r in rows])
+
+
+@app.get("/api/suppliers/{sid}/products")
+def api_supplier_products(request: Request, sid: int, q: str = "", all: int = 1):
+    """All products for a supplier, alphabetical. Default all=1 (no 12-month hide)."""
+    user = require_user(request)
+    is_admin = user["role"] == "admin"
+    q = (q or "").strip()
+    with db() as conn:
+        exists = conn.execute("SELECT id FROM suppliers WHERE id=?", (sid,)).fetchone()
+        if not exists:
+            return err("Fornitore non trovato", 404)
+        sql = """SELECT p.id, p.code, p.description, p.unit, p.last_purchase_date,
+                        p.purchase_count, p.visible, p.favorited, p.supplier_id"""
+        if is_admin:
+            sql += ", p.last_price, p.price_override, COALESCE(p.price_override, p.last_price) AS effective_price"
+        sql += " FROM products p WHERE p.supplier_id=?"
+        params: list = [sid]
+        if not all:
+            sql += " AND p.visible=1"
+        if q:
+            sql += " AND (p.description LIKE ? OR p.code LIKE ?)"
+            like = f"%{q}%"
+            params.extend([like, like])
+        sql += " ORDER BY p.description COLLATE NOCASE"
         rows = conn.execute(sql, params).fetchall()
     return ok([dict(r) for r in rows])
 
@@ -467,6 +496,24 @@ async def api_update_order(request: Request, oid: int):
     return ok()
 
 
+@app.delete("/api/orders/{oid}")
+def api_delete_order(request: Request, oid: int):
+    """Delete a draft order. Admin: any draft. Employee: only own drafts. Never sent orders."""
+    user = require_user(request)
+    with db() as conn:
+        o = conn.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+        if not o:
+            return err("Ordine non trovato", 404)
+        if o["status"] != "bozza":
+            return err("Si possono eliminare solo le bozze (non gli ordini inviati)", 403)
+        if user["role"] != "admin" and o["created_by"] != user["id"]:
+            return err("Puoi eliminare solo le tue bozze", 403)
+        conn.execute("DELETE FROM order_lines WHERE order_id=?", (oid,))
+        conn.execute("DELETE FROM orders WHERE id=?", (oid,))
+    audit(user, "delete_order", "order", oid)
+    return ok()
+
+
 @app.post("/api/orders/{oid}/lines")
 async def api_add_line(request: Request, oid: int):
     user = require_user(request)
@@ -480,7 +527,12 @@ async def api_add_line(request: Request, oid: int):
         pid = body.get("product_id")
         desc = body.get("description")
         unit = body.get("unit") or ""
-        qty = float(body.get("quantity") or 1)
+        if "quantity" in body and body.get("quantity") is not None and body.get("quantity") != "":
+            qty = float(body.get("quantity"))
+        else:
+            qty = 1.0
+        set_abs = bool(body.get("set"))
+        lid = None
         if pid:
             # upsert quantity if product already in order
             existing = conn.execute(
@@ -488,11 +540,18 @@ async def api_add_line(request: Request, oid: int):
                 (oid, pid),
             ).fetchone()
             if existing:
-                conn.execute(
-                    "UPDATE order_lines SET quantity=? WHERE id=?",
-                    (float(existing["quantity"]) + qty, existing["id"]),
-                )
-                lid = existing["id"]
+                new_qty = qty if set_abs else (float(existing["quantity"]) + qty)
+                if set_abs and new_qty <= 0:
+                    conn.execute("DELETE FROM order_lines WHERE id=?", (existing["id"],))
+                    lid = existing["id"]
+                else:
+                    conn.execute(
+                        "UPDATE order_lines SET quantity=? WHERE id=?",
+                        (new_qty, existing["id"]),
+                    )
+                    lid = existing["id"]
+            elif set_abs and qty <= 0:
+                lid = None
             else:
                 prod = conn.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
                 if not prod:
@@ -516,7 +575,8 @@ async def api_add_line(request: Request, oid: int):
             "UPDATE orders SET updated_at=datetime('now','localtime'), updated_by=? WHERE id=?",
             (user["id"], oid),
         )
-    audit(user, "add_order_line", "order", oid, f"line={lid}")
+    if lid is not None:
+        audit(user, "add_order_line", "order", oid, f"line={lid}")
     return ok({"id": lid})
 
 
@@ -719,6 +779,72 @@ def api_recipe(request: Request, rid: int):
             "notes": cost["notes"],
         }
     return ok(data)
+
+
+@app.post("/api/recipes/preview-cost")
+async def api_preview_recipe_cost(request: Request):
+    """Compute food cost for a recipe draft without saving. Prices only for admin."""
+    user = require_user(request)
+    is_admin = user["role"] == "admin"
+    body = await request.json()
+    yield_qty = float(body.get("yield_qty") or 0)
+    yield_unit = (body.get("yield_unit") or "kg").lower()
+    if yield_unit in ("g", "gr"):
+        yield_kg = yield_qty / 1000.0
+    else:
+        yield_kg = yield_qty
+    ingredients = body.get("ingredients") or []
+    with db() as conn:
+        line_costs = []
+        total = 0.0
+        missing = False
+        for idx, ing in enumerate(ingredients):
+            fake = {
+                "id": idx,
+                "kind": ing.get("kind") or "product",
+                "name": ing.get("name") or "",
+                "quantity": float(ing.get("quantity") or 0),
+                "unit": ing.get("unit") or "kg",
+                "product_id": ing.get("product_id"),
+                "sub_recipe_id": ing.get("sub_recipe_id"),
+                "unit_cost_override": None if ing.get("unit_cost_override") in (None, "") else float(ing["unit_cost_override"]),
+            }
+            info = ingredient_cost(conn, fake)
+            if info.get("line_cost") is not None:
+                total += float(info["line_cost"])
+            else:
+                missing = True
+            line_costs.append(info)
+        extras = (
+            float(body.get("extra_condiments") or 0)
+            + float(body.get("extra_packaging") or 0)
+            + float(body.get("extra_energy_labor") or 0)
+        )
+        total += extras
+        cost_per_kg = (total / yield_kg) if yield_kg > 0 else None
+    if not is_admin:
+        return ok({
+            "yield_kg": yield_kg,
+            "ingredient_count": len(ingredients),
+            "has_missing_prices": missing,
+        })
+    return ok({
+        "total_cost": round(total, 4),
+        "cost_per_kg": round(cost_per_kg, 4) if cost_per_kg is not None else None,
+        "yield_kg": yield_kg,
+        "extras": extras,
+        "has_missing_prices": missing,
+        "ingredients": [
+            {
+                "name": i["name"],
+                "quantity": i["quantity"],
+                "unit": i["unit"],
+                "line_cost": i.get("line_cost"),
+                "note": i.get("note"),
+            }
+            for i in line_costs
+        ],
+    })
 
 
 @app.post("/api/recipes")
