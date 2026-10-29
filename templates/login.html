@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <meta name="theme-color" content="#1a5c3a"/>
+  <title>Accedi — POTA LA GASTRO</title>
+  <link rel="stylesheet" href="/static/app.css"/>
+</head>
+<body class="login-body">
+  <main class="login-card">
+    <div class="brand">
+      <div class="brand-mark">PLG</div>
+      <h1>POTA LA GASTRO</h1>
+      <p class="muted">Ordini &amp; Food Cost · Prevalle BS</p>
+    </div>
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/login" class="stack">
+      <label>Utente
+        <input type="text" name="username" autocomplete="username" required autofocus/>
+      </label>
+      <label>Password
+        <input type="password" name="password" autocomplete="current-password" required/>
+      </label>
+      <button type="submit" class="btn btn-primary btn-block">Accedi</button>
+    </form>
+  </main>
+</body>
+</html>

@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <meta name="theme-color" content="#1a5c3a"/>
+  <title>POTA LA GASTRO</title>
+  <link rel="stylesheet" href="/static/app.css"/>
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>POTA LA GASTRO</h1>
+      <div class="user-chip">{{ user.full_name }} · {{ 'Admin' if is_admin else 'Dipendente' }}</div>
+    </div>
+    <form method="post" action="/logout"><button class="btn btn-sm btn-ghost" style="color:#fff;border-color:rgba(255,255,255,.35)">Esci</button></form>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="ordini">Ordini</button>
+    <button class="tab" data-tab="foodcost">Food Cost</button>
+    {% if is_admin %}
+    <button class="tab" data-tab="admin">Admin</button>
+    {% endif %}
+  </nav>
+
+  <!-- ORDINI -->
+  <section id="page-ordini" class="page active">
+    <div class="card search-bar">
+      <span class="ico">🔍</span>
+      <input id="search-q" type="search" placeholder="Cerca prodotto (es. zuc)…" enterkeyhint="search"/>
+    </div>
+    <div id="search-results" class="card hidden"></div>
+
+    <div class="section-title">Fornitori</div>
+    <div id="supplier-chips" class="row" style="margin-bottom:10px;overflow:auto;flex-wrap:nowrap;padding-bottom:4px"></div>
+    <div id="supplier-panel" class="card hidden"></div>
+
+    <div class="section-title">Bozze e storico</div>
+    <div id="orders-list" class="card"><div class="empty">Caricamento…</div></div>
+
+    <div id="order-detail" class="hidden"></div>
+  </section>
+
+  <!-- FOOD COST -->
+  <section id="page-foodcost" class="page">
+    <div class="kpi" style="margin-bottom:12px">
+      <div class="card"><div class="num" id="weekly-new">0</div><div class="muted">Ricette questa settimana</div></div>
+      <div class="card"><div class="num">7</div><div class="muted">Obiettivo</div></div>
+    </div>
+    <div class="row-between" style="margin-bottom:10px">
+      <div class="section-title" style="margin:0">Ricette</div>
+      <button class="btn btn-sm btn-primary" id="btn-new-recipe">+ Nuova</button>
+    </div>
+    <div id="recipes-list" class="card"><div class="empty">Caricamento…</div></div>
+    <div id="recipe-detail" class="hidden"></div>
+    <div id="recipe-form" class="card hidden"></div>
+  </section>
+
+  {% if is_admin %}
+  <section id="page-admin" class="page">
+    <div class="card">
+      <h2>Catalogo</h2>
+      <div id="catalog-stats" class="muted" style="margin-bottom:10px">…</div>
+      <button class="btn btn-secondary" id="btn-reimport">Reimporta catalogo da CSV</button>
+      <p class="muted" style="margin-top:8px;font-size:.8rem">Aggiorna il file <code>data/catalogo_import.csv</code> dal Google Sheet e poi premi il pulsante.</p>
+    </div>
+    <div class="card">
+      <h2>Nuovo utente</h2>
+      <form id="form-user" class="stack">
+        <label>Username <input name="username" required/></label>
+        <label>Nome completo <input name="full_name" required/></label>
+        <label>Password <input name="password" type="password" required minlength="6"/></label>
+        <label>Ruolo
+          <select name="role"><option value="dipendente">Dipendente</option><option value="admin">Admin</option></select>
+        </label>
+        <button class="btn btn-primary" type="submit">Crea utente</button>
+      </form>
+      <div id="users-list" style="margin-top:14px"></div>
+    </div>
+    <div class="card">
+      <h2>Log attività</h2>
+      <div id="audit-list" class="muted" style="font-size:.8rem"></div>
+    </div>
+  </section>
+  {% endif %}
+
+  <script>
+    window.PLG = { isAdmin: {{ 'true' if is_admin else 'false' }}, userName: {{ user.full_name|tojson }} };
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

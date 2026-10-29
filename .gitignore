@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+data/app.db
+data/app.db-*
+data/session_secret.txt
+data/catalogo_import.csv
+data/catalogo_raw_*.csv
+data/*.csv
+CREDENZIALI_ADMIN.txt
+HOSTING.md
+RENDER_DEPLOY_STATUS.txt
+*.log
+.pytest_cache/
+.env
+.DS_Store
