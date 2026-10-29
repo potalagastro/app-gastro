@@ -185,6 +185,28 @@ async def api_create_user(request: Request):
         return err(f"Errore: {e}")
 
 
+@app.post("/api/me/password")
+async def api_change_own_password(request: Request):
+    """Change the logged-in user's password; requires current password."""
+    user = require_user(request)
+    body = await request.json()
+    current = body.get("current_password") or ""
+    new = body.get("new_password") or ""
+    if not current or not new:
+        return err("Password attuale e nuova obbligatorie")
+    if len(new) < 6:
+        return err("Password nuova: minimo 6 caratteri")
+    if not verify_password(current, user["password_hash"]):
+        return err("Password attuale non corretta", 403)
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (hash_password(new), user["id"]),
+        )
+    audit(user, "change_password", "user", user["id"])
+    return ok()
+
+
 # ─── Catalog / search ────────────────────────────────────
 
 @app.get("/api/suppliers")
