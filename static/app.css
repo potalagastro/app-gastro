@@ -1,15 +1,20 @@
 :root {
-  --green: #1a5c3a;
-  --green-2: #248050;
-  --green-soft: #e8f5ee;
-  --amber: #c98900;
-  --red: #c0392b;
-  --bg: #f4f6f5;
+  /* Official brand from potalagastro.com: --brand:#C05621; logo tan ~#99704A */
+  --brand: #C05621;
+  --brand-2: #9A4319;
+  --brand-soft: #FFF0E6;
+  --logo-tan: #99704A;
+  --green: #C05621;      /* keep old var names mapped to brand for compatibility */
+  --green-2: #9A4319;
+  --green-soft: #FFF0E6;
+  --amber: #DF9200;
+  --red: #C0392B;
+  --bg: #FFF7ED;
   --card: #fff;
-  --text: #1c2420;
-  --muted: #66736b;
-  --border: #d7e0da;
-  --shadow: 0 2px 12px rgba(26,92,58,.08);
+  --text: #1C1917;
+  --muted: #78716C;
+  --border: #E7D5C5;
+  --shadow: 0 2px 14px rgba(192,86,33,.12);
   --radius: 14px;
   --safe-b: env(safe-area-inset-bottom, 0px);
 }
@@ -19,11 +24,12 @@ body { min-height: 100dvh; -webkit-tap-highlight-color: transparent; }
 button, input, select, textarea { font: inherit; }
 a { color: var(--green); }
 
-.login-body { display:flex; align-items:center; justify-content:center; padding: 24px; background: linear-gradient(160deg, #1a5c3a, #0f3d27); min-height:100dvh; }
+.login-body { display:flex; align-items:center; justify-content:center; padding: 24px; background: linear-gradient(160deg, #C05621, #7B3306); min-height:100dvh; }
 .login-card { background: var(--card); width:100%; max-width: 400px; border-radius: 20px; padding: 28px 22px; box-shadow: var(--shadow); }
 .brand { text-align:center; margin-bottom: 18px; }
-.brand-mark { display:inline-flex; width:56px; height:56px; border-radius:16px; background:var(--green); color:#fff; align-items:center; justify-content:center; font-weight:800; letter-spacing:.04em; margin-bottom:10px; }
-.brand h1 { margin:0; font-size:1.35rem; color:var(--green); }
+.brand-logo { width:112px; height:112px; border-radius:50%; object-fit:cover; margin-bottom:12px; box-shadow: 0 8px 24px rgba(0,0,0,.18); background:#fff; }
+.brand-mark { display:inline-flex; width:56px; height:56px; border-radius:16px; background:var(--brand); color:#fff; align-items:center; justify-content:center; font-weight:800; letter-spacing:.04em; margin-bottom:10px; }
+.brand h1 { margin:0; font-size:1.35rem; color:var(--brand); }
 .muted { color: var(--muted); font-size: .9rem; }
 .stack { display:flex; flex-direction:column; gap:12px; }
 label { display:flex; flex-direction:column; gap:6px; font-size:.85rem; font-weight:600; color:var(--muted); }
@@ -50,11 +56,18 @@ input:focus, select:focus, textarea:focus { outline:2px solid var(--green-soft);
 .alert-ok { background:var(--green-soft); color:var(--green); }
 
 .app-header {
-  position: sticky; top:0; z-index:20; background:var(--green); color:#fff;
-  padding: 12px 16px; display:flex; align-items:center; justify-content:space-between; gap:10px;
+  position: sticky; top:0; z-index:20; background:var(--brand); color:#fff;
+  padding: 10px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px;
+  box-shadow: 0 2px 10px rgba(123,51,6,.25);
 }
-.app-header h1 { margin:0; font-size:1.05rem; font-weight:800; letter-spacing:.02em; }
-.app-header .user-chip { font-size:.8rem; opacity:.9; }
+.header-brand { display:flex; align-items:center; gap:10px; min-width:0; }
+.header-logo {
+  width:40px; height:40px; border-radius:50%; object-fit:cover; flex-shrink:0;
+  background:#fff; box-shadow: 0 0 0 2px rgba(255,255,255,.35);
+}
+.app-header h1 { margin:0; font-size:1.0rem; font-weight:800; letter-spacing:.02em; }
+.app-header .user-chip { font-size:.78rem; opacity:.92; }
+.header-logout { color:#fff !important; border-color:rgba(255,255,255,.4) !important; }
 .tabs {
   display:flex; background:#fff; border-bottom:1px solid var(--border); position:sticky; top:52px; z-index:15;
 }
@@ -196,3 +209,20 @@ input:focus, select:focus, textarea:focus { outline:2px solid var(--green-soft);
   .prod-row { flex-wrap:wrap; }
   .stepper-wrap { width:100%; flex-direction:row; justify-content:flex-end; align-items:center; }
 }
+
+
+/* Brand: potalagastro.com --brand:#C05621; logo tan ~#99704A */
+.tab.active { color: var(--brand); border-bottom-color: var(--brand); }
+.btn-primary { background: var(--brand); color:#fff; }
+.btn-primary:active { background: var(--brand-2); }
+.btn-secondary { background: var(--brand-soft); color: var(--brand-2); }
+.btn-ghost { color: var(--brand); }
+a { color: var(--brand); }
+.badge { background: var(--brand-soft); color: var(--brand-2); }
+.sup-btn:active, .sup-btn:hover { border-color: var(--brand); background: var(--brand-soft); }
+.sup-btn .sup-arrow { color: var(--brand); }
+.stepper .step-btn { background: var(--brand-soft); color: var(--brand-2); }
+.stepper .step-btn.plus { background: var(--brand); color:#fff; }
+.kpi .num { color: var(--brand); }
+.cost-summary strong { color: var(--brand-2); }
+input:focus, select:focus, textarea:focus { outline:2px solid var(--brand-soft); border-color: var(--brand); }
