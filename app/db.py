@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS products (
   visible INTEGER NOT NULL DEFAULT 1,
   favorited INTEGER NOT NULL DEFAULT 0,
   price_override REAL,
+  default_order_unit TEXT NOT NULL DEFAULT 'Kg',
   UNIQUE(supplier_id, code, description)
 );
 
@@ -155,3 +156,46 @@ def db():
 def init_db():
     with db() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
+
+
+def _table_cols(conn, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate(conn):
+    """Safe additive migrations for existing /var/data SQLite files."""
+    from .units import infer_order_unit, normalize_order_unit, ORDER_UNIT_VALUES
+
+    cols = _table_cols(conn, "products")
+    if "default_order_unit" not in cols:
+        conn.execute(
+            "ALTER TABLE products ADD COLUMN default_order_unit TEXT NOT NULL DEFAULT 'Kg'"
+        )
+        rows = conn.execute("SELECT id, unit, description FROM products").fetchall()
+        for r in rows:
+            u = infer_order_unit(r["unit"], r["description"])
+            conn.execute(
+                "UPDATE products SET default_order_unit=? WHERE id=?",
+                (u, r["id"]),
+            )
+        conn.execute(
+            "INSERT OR REPLACE INTO app_meta(key, value) VALUES ('migration_default_order_unit', datetime('now','localtime'))"
+        )
+
+    # Normalize any order_lines still carrying raw invoice units into the 4 values
+    # (only rewrite when we can map; leave exotic text alone then force Pezzo/Kg via normalize)
+    line_rows = conn.execute("SELECT id, unit, description FROM order_lines").fetchall()
+    for r in line_rows:
+        nu = normalize_order_unit(r["unit"], fallback=infer_order_unit(r["unit"], r["description"]))
+        if nu != (r["unit"] or ""):
+            conn.execute("UPDATE order_lines SET unit=? WHERE id=?", (nu, r["id"]))
+
+    # Ensure all products have a valid canonical default
+    bad = conn.execute(
+        f"SELECT id, unit, description, default_order_unit FROM products WHERE default_order_unit NOT IN ({','.join('?'*len(ORDER_UNIT_VALUES))})",
+        ORDER_UNIT_VALUES,
+    ).fetchall()
+    for r in bad:
+        u = infer_order_unit(r["unit"], r["description"])
+        conn.execute("UPDATE products SET default_order_unit=? WHERE id=?", (u, r["id"]))

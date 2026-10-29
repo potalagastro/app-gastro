@@ -25,6 +25,7 @@ from .auth import (
 )
 from .catalog_import import CSV_PATH, import_catalog
 from .db import DB_PATH, db, init_db
+from .units import ORDER_UNITS, ORDER_UNIT_VALUES, infer_order_unit, normalize_order_unit, unit_label
 from .foodcost import compute_recipe_cost, scale_ingredients, ingredient_cost
 
 BASE = Path(__file__).resolve().parent.parent
@@ -269,7 +270,7 @@ def api_search(request: Request, q: str = "", supplier_id: int | None = None, al
     is_admin = user["role"] == "admin"
     q = (q or "").strip()
     with db() as conn:
-        sql = """SELECT p.id, p.code, p.description, p.unit, p.last_purchase_date,
+        sql = """SELECT p.id, p.code, p.description, p.unit, p.default_order_unit, p.last_purchase_date,
                         p.purchase_count, p.visible, p.favorited, p.supplier_id,
                         s.name AS supplier_name"""
         if is_admin:
@@ -302,7 +303,7 @@ def api_supplier_products(request: Request, sid: int, q: str = "", all: int = 1)
         exists = conn.execute("SELECT id FROM suppliers WHERE id=?", (sid,)).fetchone()
         if not exists:
             return err("Fornitore non trovato", 404)
-        sql = """SELECT p.id, p.code, p.description, p.unit, p.last_purchase_date,
+        sql = """SELECT p.id, p.code, p.description, p.unit, p.default_order_unit, p.last_purchase_date,
                         p.purchase_count, p.visible, p.favorited, p.supplier_id"""
         if is_admin:
             sql += ", p.last_price, p.price_override, COALESCE(p.price_override, p.last_price) AS effective_price"
@@ -317,6 +318,30 @@ def api_supplier_products(request: Request, sid: int, q: str = "", all: int = 1)
         sql += " ORDER BY p.description COLLATE NOCASE"
         rows = conn.execute(sql, params).fetchall()
     return ok([dict(r) for r in rows])
+
+
+@app.get("/api/units")
+def api_units(request: Request):
+    """Canonical order units for the mobile selector."""
+    require_user(request)
+    return ok(ORDER_UNITS)
+
+
+@app.put("/api/products/{pid}/default-unit")
+async def api_product_default_unit(request: Request, pid: int):
+    """Admin: set the default order unit for a product (Kg/Ct/Cassa/Pezzo)."""
+    admin = require_admin(request)
+    body = await request.json()
+    unit = normalize_order_unit(body.get("unit") or body.get("default_order_unit"))
+    if unit not in ORDER_UNIT_VALUES:
+        return err("Unità non valida")
+    with db() as conn:
+        row = conn.execute("SELECT id FROM products WHERE id=?", (pid,)).fetchone()
+        if not row:
+            return err("Prodotto non trovato", 404)
+        conn.execute("UPDATE products SET default_order_unit=? WHERE id=?", (unit, pid))
+    audit(admin, "set_default_order_unit", "product", pid, unit)
+    return ok({"id": pid, "default_order_unit": unit})
 
 
 @app.post("/api/products/{pid}/visibility")
@@ -526,49 +551,62 @@ async def api_add_line(request: Request, oid: int):
             return err("Ordine già inviato", 403)
         pid = body.get("product_id")
         desc = body.get("description")
-        unit = body.get("unit") or ""
         if "quantity" in body and body.get("quantity") is not None and body.get("quantity") != "":
             qty = float(body.get("quantity"))
         else:
             qty = 1.0
         set_abs = bool(body.get("set"))
+        unit_in = body.get("unit")
         lid = None
         if pid:
             # upsert quantity if product already in order
             existing = conn.execute(
-                "SELECT id, quantity FROM order_lines WHERE order_id=? AND product_id=?",
+                "SELECT id, quantity, unit FROM order_lines WHERE order_id=? AND product_id=?",
                 (oid, pid),
             ).fetchone()
+            prod = conn.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+            if not prod:
+                return err("Prodotto non trovato", 404)
+            default_u = normalize_order_unit(
+                prod["default_order_unit"] if "default_order_unit" in prod.keys() else None,
+                fallback=infer_order_unit(prod["unit"], prod["description"]),
+            )
+            line_unit = normalize_order_unit(unit_in, fallback=default_u) if unit_in not in (None, "") else (
+                normalize_order_unit(existing["unit"], fallback=default_u) if existing else default_u
+            )
             if existing:
                 new_qty = qty if set_abs else (float(existing["quantity"]) + qty)
                 if set_abs and new_qty <= 0:
                     conn.execute("DELETE FROM order_lines WHERE id=?", (existing["id"],))
                     lid = existing["id"]
                 else:
+                    # If client sent unit, update it; else keep existing line unit
+                    if unit_in not in (None, ""):
+                        line_unit = normalize_order_unit(unit_in, fallback=default_u)
+                    else:
+                        line_unit = normalize_order_unit(existing["unit"], fallback=default_u)
                     conn.execute(
-                        "UPDATE order_lines SET quantity=? WHERE id=?",
-                        (new_qty, existing["id"]),
+                        "UPDATE order_lines SET quantity=?, unit=? WHERE id=?",
+                        (new_qty, line_unit, existing["id"]),
                     )
                     lid = existing["id"]
             elif set_abs and qty <= 0:
                 lid = None
             else:
-                prod = conn.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
-                if not prod:
-                    return err("Prodotto non trovato", 404)
                 cur = conn.execute(
                     """INSERT INTO order_lines (order_id, product_id, description, unit, quantity)
                        VALUES (?,?,?,?,?)""",
-                    (oid, pid, prod["description"], prod["unit"] or unit, qty),
+                    (oid, pid, prod["description"], line_unit, qty),
                 )
                 lid = cur.lastrowid
         else:
             if not desc:
                 return err("description obbligatoria")
+            line_unit = normalize_order_unit(unit_in, fallback="Pezzo")
             cur = conn.execute(
                 """INSERT INTO order_lines (order_id, product_id, description, unit, quantity)
                    VALUES (?,?,?,?,?)""",
-                (oid, None, desc, unit, qty),
+                (oid, None, desc, line_unit, qty),
             )
             lid = cur.lastrowid
         conn.execute(
@@ -592,6 +630,11 @@ async def api_update_line(request: Request, oid: int, lid: int):
             conn.execute(
                 "UPDATE order_lines SET quantity=? WHERE id=? AND order_id=?",
                 (float(body["quantity"]), lid, oid),
+            )
+        if "unit" in body and body.get("unit") not in (None, ""):
+            conn.execute(
+                "UPDATE order_lines SET unit=? WHERE id=? AND order_id=?",
+                (normalize_order_unit(body.get("unit")), lid, oid),
             )
         if "received_status" in body:
             rs = body["received_status"]
@@ -665,7 +708,7 @@ def api_favorites(request: Request, sid: int):
     require_user(request)
     with db() as conn:
         rows = conn.execute(
-            """SELECT p.id, p.description, p.unit, p.code FROM products p
+            """SELECT p.id, p.description, p.unit, p.default_order_unit, p.code FROM products p
                WHERE p.supplier_id=? AND p.favorited=1 AND p.visible=1
                ORDER BY p.description""",
             (sid,),
@@ -705,8 +748,12 @@ def api_send_order(request: Request, oid: int):
         for ln in lines:
             q = ln["quantity"]
             qstr = str(int(q)) if float(q).is_integer() else str(q)
-            unit = ln["unit"] or ""
-            rows_txt.append(f"- {ln['description']}: {qstr} {unit}".rstrip())
+            unit = normalize_order_unit(ln["unit"], fallback="") or ""
+            # e.g. "3 Cassa Zucchine"
+            if unit:
+                rows_txt.append(f"- {qstr} {unit} {ln['description']}")
+            else:
+                rows_txt.append(f"- {qstr} {ln['description']}")
         msg = (
             f"{saluto}\n\n"
             f"Ordine POTA LA GASTRO\n"

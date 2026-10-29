@@ -2,6 +2,23 @@
 const IS_ADMIN = !!(window.PLG && window.PLG.isAdmin);
 const USER_ID = (window.PLG && window.PLG.userId) || null;
 
+const ORDER_UNITS = [
+  { value: "Kg", label: "Kg" },
+  { value: "Ct", label: "Ct (cartone)" },
+  { value: "Cassa", label: "Cassa" },
+  { value: "Pezzo", label: "Pezzo" },
+];
+function unitOptionsHtml(selected) {
+  const sel = selected || "Kg";
+  return ORDER_UNITS.map(u =>
+    `<option value="${u.value}" ${u.value === sel ? "selected" : ""}>${u.label}</option>`
+  ).join("");
+}
+function unitShortLabel(v) {
+  const u = ORDER_UNITS.find(x => x.value === v);
+  return u ? u.label : (v || "Kg");
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
@@ -48,6 +65,7 @@ let currentSupplierId = null;
 let searchTimer = null;
 let qtyBusy = false;
 let draftQty = {}; // product_id -> qty
+let draftUnit = {}; // product_id -> order unit
 let draftLines = []; // full lines for fab count
 let catalogProducts = []; // current supplier catalog
 
@@ -109,9 +127,13 @@ async function ensureDraft(sid) {
   currentOrderId = o.id;
   const full = await api(`/api/orders/${o.id}`);
   draftQty = {};
+  draftUnit = {};
   draftLines = full.lines || [];
   for (const l of draftLines) {
-    if (l.product_id) draftQty[l.product_id] = Number(l.quantity) || 0;
+    if (l.product_id) {
+      draftQty[l.product_id] = Number(l.quantity) || 0;
+      if (l.unit) draftUnit[l.product_id] = l.unit;
+    }
   }
   return full;
 }
@@ -183,6 +205,10 @@ async function openSupplier(sid) {
   }
 }
 
+function productDefaultUnit(p) {
+  return draftUnit[p.id] || p.default_order_unit || "Kg";
+}
+
 function renderProductList(filter) {
   const q = (filter || "").toLowerCase();
   const rows = !q ? catalogProducts : catalogProducts.filter(p =>
@@ -196,22 +222,67 @@ function renderProductList(filter) {
   }
   box.innerHTML = rows.map(p => {
     const qty = Number(draftQty[p.id] || 0);
+    const unit = productDefaultUnit(p);
     return `
       <div class="prod-row" data-pid="${p.id}">
         <div class="prod-info">
           <div class="prod-name">${esc(p.description)}</div>
-          <div class="prod-meta">${esc(p.unit || "—")}${IS_ADMIN && p.effective_price != null ? " · " + fmtPrice(p.effective_price) : ""}${p.favorited ? " · ★" : ""}</div>
+          <div class="prod-meta">${IS_ADMIN && p.effective_price != null ? fmtPrice(p.effective_price) + " · " : ""}${p.favorited ? "★ · " : ""}fatt. ${esc(p.unit || "—")}</div>
+          ${IS_ADMIN ? `<div class="admin-default-unit"><label>Default <select class="unit-select unit-default" data-default-pid="${p.id}">${unitOptionsHtml(p.default_order_unit || "Kg")}</select></label></div>` : ""}
         </div>
-        <div class="stepper">
-          <button type="button" class="step-btn" data-act="-" data-pid="${p.id}" ${qty <= 0 ? "disabled" : ""}>−</button>
-          <span class="step-qty ${qty <= 0 ? "zero" : ""}" data-qty-label="${p.id}">${fmtQty(qty)}</span>
-          <button type="button" class="step-btn plus" data-act="+" data-pid="${p.id}">+</button>
+        <div class="stepper-wrap">
+          <div class="stepper">
+            <button type="button" class="step-btn" data-act="-" data-pid="${p.id}" ${qty <= 0 ? "disabled" : ""}>−</button>
+            <span class="step-qty ${qty <= 0 ? "zero" : ""}" data-qty-label="${p.id}">${fmtQty(qty)}</span>
+            <button type="button" class="step-btn plus" data-act="+" data-pid="${p.id}">+</button>
+          </div>
+          <select class="unit-select unit-line" data-unit-pid="${p.id}" aria-label="Unità di misura">${unitOptionsHtml(unit)}</select>
         </div>
       </div>`;
   }).join("");
   box.querySelectorAll(".step-btn").forEach(b => {
     b.onclick = () => bumpQty(Number(b.dataset.pid), b.dataset.act === "+" ? 1 : -1);
   });
+  box.querySelectorAll(".unit-line").forEach(sel => {
+    sel.onchange = () => changeLineUnit(Number(sel.dataset.unitPid), sel.value);
+  });
+  box.querySelectorAll(".unit-default").forEach(sel => {
+    sel.onchange = async () => {
+      const pid = Number(sel.dataset.defaultPid);
+      try {
+        await api(`/api/products/${pid}/default-unit`, {
+          method: "PUT",
+          body: JSON.stringify({ unit: sel.value }),
+        });
+        const prod = catalogProducts.find(x => x.id === pid);
+        if (prod) prod.default_order_unit = sel.value;
+        // If line has no qty yet, preselect this default for the order selector
+        if (!draftQty[pid]) {
+          draftUnit[pid] = sel.value;
+          const lineSel = box.querySelector(`.unit-line[data-unit-pid="${pid}"]`);
+          if (lineSel) lineSel.value = sel.value;
+        }
+      } catch (e) { alert(e.message); sel.value = catalogProducts.find(x => x.id === pid)?.default_order_unit || "Kg"; }
+    };
+  });
+}
+
+async function changeLineUnit(pid, unit) {
+  draftUnit[pid] = unit;
+  const qty = Number(draftQty[pid] || 0);
+  if (!currentOrderId || qty <= 0) return;
+  if (qtyBusy) return;
+  qtyBusy = true;
+  try {
+    await api(`/api/orders/${currentOrderId}/lines`, {
+      method: "POST",
+      body: JSON.stringify({ product_id: pid, quantity: qty, set: true, unit }),
+    });
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    qtyBusy = false;
+  }
 }
 
 async function bumpQty(pid, delta) {
@@ -219,13 +290,16 @@ async function bumpQty(pid, delta) {
   const cur = Number(draftQty[pid] || 0);
   const next = Math.max(0, cur + delta);
   if (next === cur) return;
+  const prod = catalogProducts.find(x => x.id === pid);
+  const unit = draftUnit[pid] || prod?.default_order_unit || "Kg";
   qtyBusy = true;
   try {
     await api(`/api/orders/${currentOrderId}/lines`, {
       method: "POST",
-      body: JSON.stringify({ product_id: pid, quantity: next, set: true }),
+      body: JSON.stringify({ product_id: pid, quantity: next, set: true, unit }),
     });
     draftQty[pid] = next;
+    draftUnit[pid] = unit;
     const label = document.querySelector(`[data-qty-label="${pid}"]`);
     if (label) {
       label.textContent = fmtQty(next);
@@ -335,7 +409,7 @@ async function openOrder(oid) {
           <div class="line-item">
             <div style="flex:1">
               <div class="title">${esc(l.description)}</div>
-              <div class="result-meta">${esc(l.unit || "")}
+              <div class="result-meta">${esc(unitShortLabel(l.unit || "Kg"))}
                 ${o.status === "inviato" ? ` · arrivo:
                   <select data-recv="${l.id}" class="btn-sm">
                     <option value="pending" ${l.received_status==="pending"?"selected":""}>da controllare</option>
@@ -345,8 +419,11 @@ async function openOrder(oid) {
                   </select>` : ""}
               </div>
             </div>
-            <input class="qty-input" type="number" min="0" step="any" value="${l.quantity}" data-qty="${l.id}" ${canEdit && o.status==="bozza" ? "" : "disabled"}/>
-            ${o.status==="bozza" ? `<button class="btn btn-sm btn-danger" data-del="${l.id}">✕</button>` : ""}
+            <div class="stepper-wrap line-controls">
+              <input class="qty-input" type="number" min="0" step="any" value="${l.quantity}" data-qty="${l.id}" ${canEdit && o.status==="bozza" ? "" : "disabled"}/>
+              <select class="unit-select" data-unit-line="${l.id}" ${canEdit && o.status==="bozza" ? "" : "disabled"}>${unitOptionsHtml(l.unit || "Kg")}</select>
+              ${o.status==="bozza" ? `<button class="btn btn-sm btn-danger" data-del="${l.id}">✕</button>` : ""}
+            </div>
           </div>`).join("") || '<div class="empty">Nessuna riga — aggiungi prodotti dal fornitore</div>'}
       </div>
       ${IS_ADMIN && o.status === "bozza" ? `
@@ -366,7 +443,11 @@ async function openOrder(oid) {
   $("#btn-save-ord").onclick = async () => {
     await api(`/api/orders/${oid}`, { method: "PUT", body: JSON.stringify({ delivery_date: $("#ord-delivery").value }) });
     for (const inp of $all("[data-qty]")) {
-      await api(`/api/orders/${oid}/lines/${inp.dataset.qty}`, { method: "PUT", body: JSON.stringify({ quantity: Number(inp.value) }) });
+      const lid = inp.dataset.qty;
+      const unitSel = document.querySelector(`[data-unit-line="${lid}"]`);
+      const body = { quantity: Number(inp.value) };
+      if (unitSel) body.unit = unitSel.value;
+      await api(`/api/orders/${oid}/lines/${lid}`, { method: "PUT", body: JSON.stringify(body) });
     }
     alert("Salvato");
     openOrder(oid);
@@ -381,6 +462,16 @@ async function openOrder(oid) {
     b.onclick = async () => {
       await api(`/api/orders/${oid}/lines/${b.dataset.del}`, { method: "DELETE" });
       openOrder(oid);
+    };
+  });
+  $all("[data-unit-line]").forEach(sel => {
+    sel.onchange = async () => {
+      try {
+        await api(`/api/orders/${oid}/lines/${sel.dataset.unitLine}`, {
+          method: "PUT",
+          body: JSON.stringify({ unit: sel.value }),
+        });
+      } catch (e) { alert(e.message); }
     };
   });
   $all("[data-recv]").forEach(sel => {

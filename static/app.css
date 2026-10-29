@@ -171,3 +171,28 @@ input:focus, select:focus, textarea:focus { outline:2px solid var(--green-soft);
 .pick-item:active, .pick-item:hover { background:var(--green-soft); }
 .pick-item .muted { display:block; font-size:.75rem; margin-top:2px; }
 .cost-summary strong { color:var(--green); }
+
+/* Unit of measure selector (mobile) */
+.stepper-wrap {
+  display:flex; flex-direction:column; align-items:flex-end; gap:6px; flex-shrink:0;
+}
+.unit-select {
+  min-height:40px; min-width:118px; max-width:140px;
+  border:1px solid var(--border); border-radius:10px;
+  padding:8px 10px; background:#fff; font-weight:700; font-size:.9rem;
+  color:var(--text);
+}
+.unit-select:disabled { opacity:.6; }
+.admin-default-unit {
+  margin-top:6px; font-size:.75rem; color:var(--muted);
+}
+.admin-default-unit label {
+  flex-direction:row; align-items:center; gap:6px; font-weight:600;
+}
+.admin-default-unit .unit-select { min-height:34px; min-width:110px; font-size:.8rem; padding:4px 8px; }
+.line-controls { flex-direction:row; align-items:center; gap:6px; }
+.line-controls .qty-input { width:64px; }
+@media (max-width:380px) {
+  .prod-row { flex-wrap:wrap; }
+  .stepper-wrap { width:100%; flex-direction:row; justify-content:flex-end; align-items:center; }
+}

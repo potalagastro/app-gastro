@@ -7,6 +7,7 @@ from pathlib import Path
 
 import os
 
+from .units import infer_order_unit
 from .db import db
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -123,6 +124,7 @@ def import_catalog(csv_path: Path | None = None, user_id: int | None = None, use
                 (sid, code, desc),
             ).fetchone()
             default_visible = 1 if within_12_months(last_date, today) else 0
+            order_unit = infer_order_unit(unit, desc)
             if existing:
                 conn.execute(
                     """UPDATE products SET unit=?, last_price=?, last_purchase_date=?,
@@ -130,13 +132,14 @@ def import_catalog(csv_path: Path | None = None, user_id: int | None = None, use
                        WHERE id=?""",
                     (unit, last_price, last_date, last_inv, pmin, pmax, n_acq, existing["id"]),
                 )
+                # Do not overwrite admin-chosen default_order_unit on reimport
             else:
                 conn.execute(
                     """INSERT INTO products
                        (supplier_id, code, description, unit, last_price, last_purchase_date,
-                        last_invoice, price_min, price_max, purchase_count, visible)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                    (sid, code, desc, unit, last_price, last_date, last_inv, pmin, pmax, n_acq, default_visible),
+                        last_invoice, price_min, price_max, purchase_count, visible, default_order_unit)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (sid, code, desc, unit, last_price, last_date, last_inv, pmin, pmax, n_acq, default_visible, order_unit),
                 )
                 if default_visible:
                     visible_count += 1
