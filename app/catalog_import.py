@@ -21,7 +21,88 @@ MERGE_MAP = {
     "PREVALCART S.R.L.": "PREVALCART S.R.L.",
 }
 
-EXCLUDE_SUBSTR = ("SANTOMARCO",)
+# Substrings matched case-insensitively against supplier name (like SANTOMARCO).
+# Kept out of Ordini forever, including future catalog imports.
+EXCLUDE_SUBSTR = (
+    "SANTOMARCO",
+    "AUSONIA",
+    "NANUTTI",
+    "CLPA",
+    "DALLA BONA",
+    "FALENA",
+    "EPICASA",
+    "METRO",
+    "RISTODOM",
+    "SAN CARLO",
+    "SMERALDO",
+    "SPESA INTELLIGENTE",
+    "ZA.BE",
+    "ZABE",
+    "ZEELANDIA",
+    "ZELANDIA",
+    "ZELANDA",
+)
+
+
+def is_excluded_supplier(name: str) -> bool:
+    """True if supplier name matches the permanent Ordini exclusion list."""
+    u = (name or "").upper()
+    if not u:
+        return False
+    # Normalize common punctuation so "ZA.BE" / "ZA BE" / "CLPA" still match
+    compact = u.replace(".", "").replace(" ", "")
+    for x in EXCLUDE_SUBSTR:
+        xu = x.upper()
+        if xu in u or xu.replace(".", "").replace(" ", "") in compact:
+            return True
+    return False
+
+
+def apply_supplier_exclusions() -> dict:
+    """Remove or hide excluded suppliers already in the DB.
+
+    - If a supplier has sent/draft orders or is referenced by recipes/order_lines:
+      keep rows, hide products from catalog (visible=0). API still filters them out of Ordini.
+    - Otherwise delete products then the supplier.
+    Does not modify recipes or historical order rows.
+    """
+    with db() as conn:
+        rows = conn.execute("SELECT id, name FROM suppliers").fetchall()
+        hidden, deleted_suppliers, deleted_products = [], [], 0
+        for row in rows:
+            if not is_excluded_supplier(row["name"]):
+                continue
+            sid = row["id"]
+            n_orders = conn.execute(
+                "SELECT COUNT(*) c FROM orders WHERE supplier_id=?", (sid,)
+            ).fetchone()["c"]
+            n_lines = conn.execute(
+                """SELECT COUNT(*) c FROM order_lines ol
+                   JOIN products p ON p.id=ol.product_id
+                   WHERE p.supplier_id=?""",
+                (sid,),
+            ).fetchone()["c"]
+            n_recipes = conn.execute(
+                """SELECT COUNT(*) c FROM recipe_ingredients ri
+                   JOIN products p ON p.id=ri.product_id
+                   WHERE p.supplier_id=?""",
+                (sid,),
+            ).fetchone()["c"]
+            if n_orders or n_lines or n_recipes:
+                conn.execute(
+                    "UPDATE products SET visible=0 WHERE supplier_id=?", (sid,)
+                )
+                hidden.append(row["name"])
+            else:
+                cur = conn.execute("DELETE FROM products WHERE supplier_id=?", (sid,))
+                deleted_products += cur.rowcount
+                conn.execute("DELETE FROM suppliers WHERE id=?", (sid,))
+                deleted_suppliers.append(row["name"])
+        return {
+            "hidden": hidden,
+            "deleted_suppliers": deleted_suppliers,
+            "deleted_products": deleted_products,
+        }
 
 
 def canon_supplier(name: str) -> str:
@@ -89,7 +170,7 @@ def import_catalog(csv_path: Path | None = None, user_id: int | None = None, use
                 skipped += 1
                 continue
             raw_name = (row.get("Fornitore") or "").strip()
-            if any(x in raw_name.upper() for x in EXCLUDE_SUBSTR):
+            if is_excluded_supplier(raw_name):
                 skipped += 1
                 continue
             name = canon_supplier(raw_name)
@@ -158,6 +239,8 @@ def import_catalog(csv_path: Path | None = None, user_id: int | None = None, use
             (user_id, username, "import_catalog", "products", f"upserted={upserted} new_suppliers={created_suppliers}"),
         )
 
+    exclusion = apply_supplier_exclusions()
+
     with db() as conn:
         tot = conn.execute("SELECT COUNT(*) c FROM products").fetchone()["c"]
         vis = conn.execute("SELECT COUNT(*) c FROM products WHERE visible=1").fetchone()["c"]
@@ -170,4 +253,5 @@ def import_catalog(csv_path: Path | None = None, user_id: int | None = None, use
         "products_total": tot,
         "products_visible": vis,
         "created_suppliers": created_suppliers,
+        "exclusion": exclusion,
     }

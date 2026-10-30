@@ -23,7 +23,7 @@ from .auth import (
     require_user,
     verify_password,
 )
-from .catalog_import import CSV_PATH, import_catalog
+from .catalog_import import CSV_PATH, apply_supplier_exclusions, import_catalog, is_excluded_supplier
 from .db import DB_PATH, db, init_db
 from .units import ORDER_UNITS, ORDER_UNIT_VALUES, infer_order_unit, normalize_order_unit, unit_label
 from .foodcost import compute_recipe_cost, scale_ingredients, ingredient_cost
@@ -71,6 +71,11 @@ def startup():
         bootstrap_main()
     except Exception as e:
         print(f"bootstrap warning: {e}", flush=True)
+    try:
+        excl = apply_supplier_exclusions()
+        print(f"supplier exclusions: {excl}", flush=True)
+    except Exception as e:
+        print(f"supplier exclusion warning: {e}", flush=True)
 
 
 def ok(data=None, **kw):
@@ -220,7 +225,7 @@ def api_suppliers(request: Request):
                (SELECT COUNT(*) FROM products p WHERE p.supplier_id=s.id) AS n_total
                FROM suppliers s ORDER BY s.name"""
         ).fetchall()
-    return ok([dict(r) for r in rows])
+    return ok([dict(r) for r in rows if not is_excluded_supplier(r["name"])])
 
 
 @app.get("/api/suppliers/{sid}")
@@ -228,7 +233,7 @@ def api_supplier(request: Request, sid: int):
     require_user(request)
     with db() as conn:
         row = conn.execute("SELECT * FROM suppliers WHERE id=?", (sid,)).fetchone()
-    if not row:
+    if not row or is_excluded_supplier(row["name"]):
         return err("Fornitore non trovato", 404)
     return ok(dict(row))
 
@@ -270,6 +275,13 @@ def api_search(request: Request, q: str = "", supplier_id: int | None = None, al
     is_admin = user["role"] == "admin"
     q = (q or "").strip()
     with db() as conn:
+        excluded_ids = [
+            r["id"]
+            for r in conn.execute("SELECT id, name FROM suppliers").fetchall()
+            if is_excluded_supplier(r["name"])
+        ]
+        if supplier_id and supplier_id in excluded_ids:
+            return ok([])
         sql = """SELECT p.id, p.code, p.description, p.unit, p.default_order_unit, p.last_purchase_date,
                         p.purchase_count, p.visible, p.favorited, p.supplier_id,
                         s.name AS supplier_name"""
@@ -277,6 +289,9 @@ def api_search(request: Request, q: str = "", supplier_id: int | None = None, al
             sql += ", p.last_price, p.price_override, COALESCE(p.price_override, p.last_price) AS effective_price"
         sql += " FROM products p JOIN suppliers s ON s.id=p.supplier_id WHERE 1=1"
         params: list = []
+        if excluded_ids:
+            sql += f" AND p.supplier_id NOT IN ({','.join('?' * len(excluded_ids))})"
+            params.extend(excluded_ids)
         if not all:
             sql += " AND p.visible=1"
         if supplier_id:
@@ -300,8 +315,8 @@ def api_supplier_products(request: Request, sid: int, q: str = "", all: int = 1)
     is_admin = user["role"] == "admin"
     q = (q or "").strip()
     with db() as conn:
-        exists = conn.execute("SELECT id FROM suppliers WHERE id=?", (sid,)).fetchone()
-        if not exists:
+        exists = conn.execute("SELECT id, name FROM suppliers WHERE id=?", (sid,)).fetchone()
+        if not exists or is_excluded_supplier(exists["name"]):
             return err("Fornitore non trovato", 404)
         sql = """SELECT p.id, p.code, p.description, p.unit, p.default_order_unit, p.last_purchase_date,
                         p.purchase_count, p.visible, p.favorited, p.supplier_id"""
@@ -479,6 +494,9 @@ async def api_create_order(request: Request):
         return err("supplier_id obbligatorio")
     created_new = False
     with db() as conn:
+        sup = conn.execute("SELECT id, name FROM suppliers WHERE id=?", (sid,)).fetchone()
+        if not sup or is_excluded_supplier(sup["name"]):
+            return err("Fornitore non disponibile per ordini", 404)
         # reuse existing draft for supplier if any
         existing = conn.execute(
             "SELECT id FROM orders WHERE supplier_id=? AND status='bozza' ORDER BY id DESC LIMIT 1",
