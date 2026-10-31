@@ -310,7 +310,11 @@ def api_search(request: Request, q: str = "", supplier_id: int | None = None, al
 
 @app.get("/api/suppliers/{sid}/products")
 def api_supplier_products(request: Request, sid: int, q: str = "", all: int = 1):
-    """All products for a supplier, alphabetical. Default all=1 (no 12-month hide)."""
+    """Products for a supplier with per-user favorite + recent-order stats.
+
+    Default all=1 returns every catalog row; the mobile UI hides items not bought
+    in the last 6 months under "Mostra tutti" (favorites and recently ordered stay visible).
+    """
     user = require_user(request)
     is_admin = user["role"] == "admin"
     q = (q or "").strip()
@@ -319,11 +323,27 @@ def api_supplier_products(request: Request, sid: int, q: str = "", all: int = 1)
         if not exists or is_excluded_supplier(exists["name"]):
             return err("Fornitore non trovato", 404)
         sql = """SELECT p.id, p.code, p.description, p.unit, p.default_order_unit, p.last_purchase_date,
-                        p.purchase_count, p.visible, p.favorited, p.supplier_id"""
+                        p.purchase_count, p.visible, p.supplier_id,
+                        CASE WHEN f.product_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
+                        COALESCE((
+                          SELECT COUNT(*) FROM order_lines ol
+                          JOIN orders o ON o.id=ol.order_id
+                          WHERE ol.product_id=p.id AND o.status='inviato'
+                        ), 0) AS times_ordered,
+                        (
+                          SELECT MAX(o.sent_at) FROM order_lines ol
+                          JOIN orders o ON o.id=ol.order_id
+                          WHERE ol.product_id=p.id AND o.status='inviato'
+                        ) AS last_ordered_at"""
         if is_admin:
-            sql += ", p.last_price, p.price_override, COALESCE(p.price_override, p.last_price) AS effective_price"
-        sql += " FROM products p WHERE p.supplier_id=?"
-        params: list = [sid]
+            sql += """, p.last_price, p.price_override,
+                       COALESCE(p.price_override, p.last_price) AS effective_price,
+                       (SELECT COUNT(*) FROM user_product_favorites uf WHERE uf.product_id=p.id) AS favorite_count"""
+        sql += """ FROM products p
+                   LEFT JOIN user_product_favorites f
+                     ON f.product_id=p.id AND f.user_id=?
+                   WHERE p.supplier_id=?"""
+        params: list = [user["id"], sid]
         if not all:
             sql += " AND p.visible=1"
         if q:
@@ -331,8 +351,16 @@ def api_supplier_products(request: Request, sid: int, q: str = "", all: int = 1)
             like = f"%{q}%"
             params.extend([like, like])
         sql += " ORDER BY p.description COLLATE NOCASE"
-        rows = conn.execute(sql, params).fetchall()
-    return ok([dict(r) for r in rows])
+        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+        # Has this supplier a previous sent (or any) order to repeat?
+        last_sent = conn.execute(
+            """SELECT id, sent_at FROM orders
+               WHERE supplier_id=? AND status='inviato'
+               ORDER BY sent_at DESC LIMIT 1""",
+            (sid,),
+        ).fetchone()
+        can_repeat = bool(last_sent)
+    return ok({"products": rows, "can_repeat": can_repeat, "last_sent_at": last_sent["sent_at"] if last_sent else None})
 
 
 @app.get("/api/units")
@@ -372,13 +400,26 @@ async def api_visibility(request: Request, pid: int):
 
 @app.post("/api/products/{pid}/favorite")
 async def api_favorite(request: Request, pid: int):
+    """Toggle per-user favorite star (not global)."""
     user = require_user(request)
     body = await request.json()
     fav = 1 if body.get("favorited") else 0
     with db() as conn:
-        conn.execute("UPDATE products SET favorited=? WHERE id=?", (fav, pid))
+        prod = conn.execute("SELECT id FROM products WHERE id=?", (pid,)).fetchone()
+        if not prod:
+            return err("Prodotto non trovato", 404)
+        if fav:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_product_favorites (user_id, product_id) VALUES (?,?)",
+                (user["id"], pid),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM user_product_favorites WHERE user_id=? AND product_id=?",
+                (user["id"], pid),
+            )
     audit(user, "set_favorite", "product", pid, f"favorited={fav}")
-    return ok()
+    return ok({"id": pid, "favorited": fav})
 
 
 @app.post("/api/products/{pid}/price_override")
@@ -695,6 +736,8 @@ def api_repeat_last(request: Request, oid: int):
         o = conn.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
         if not o:
             return err("Ordine non trovato", 404)
+        if o["status"] != "bozza":
+            return err("Si può ripetere solo su una bozza")
         last = conn.execute(
             """SELECT id FROM orders WHERE supplier_id=? AND status='inviato' AND id!=?
                ORDER BY sent_at DESC LIMIT 1""",
@@ -706,30 +749,71 @@ def api_repeat_last(request: Request, oid: int):
             "SELECT product_id, description, unit, quantity FROM order_lines WHERE order_id=?",
             (last["id"],),
         ).fetchall()
+        if not lines:
+            return err("L'ultimo ordine inviato non ha righe")
         conn.execute("DELETE FROM order_lines WHERE order_id=?", (oid,))
         for ln in lines:
             conn.execute(
                 """INSERT INTO order_lines (order_id, product_id, description, unit, quantity)
                    VALUES (?,?,?,?,?)""",
-                (oid, ln["product_id"], ln["description"], ln["unit"], ln["quantity"]),
+                (oid, ln["product_id"], ln["description"], ln["unit"] or "Kg", ln["quantity"]),
             )
         conn.execute(
             "UPDATE orders SET updated_at=datetime('now','localtime'), updated_by=? WHERE id=?",
             (user["id"], oid),
         )
     audit(user, "repeat_last_order", "order", oid, f"from={last['id']}")
-    return ok({"copied_from": last["id"], "lines": len(lines)})
+    return ok({"id": oid, "copied_from": last["id"], "lines": len(lines)})
+
+
+@app.post("/api/suppliers/{sid}/repeat-last")
+def api_supplier_repeat_last(request: Request, sid: int):
+    """Create a fresh draft for the supplier and copy the last sent order into it."""
+    user = require_user(request)
+    with db() as conn:
+        sup = conn.execute("SELECT id, name FROM suppliers WHERE id=?", (sid,)).fetchone()
+        if not sup or is_excluded_supplier(sup["name"]):
+            return err("Fornitore non trovato", 404)
+        last = conn.execute(
+            """SELECT id FROM orders WHERE supplier_id=? AND status='inviato'
+               ORDER BY sent_at DESC LIMIT 1""",
+            (sid,),
+        ).fetchone()
+        if not last:
+            return err("Nessun ordine inviato precedente per questo fornitore")
+        lines = conn.execute(
+            "SELECT product_id, description, unit, quantity FROM order_lines WHERE order_id=?",
+            (last["id"],),
+        ).fetchall()
+        if not lines:
+            return err("L'ultimo ordine inviato non ha righe")
+        cur = conn.execute(
+            """INSERT INTO orders (supplier_id, status, created_by, updated_at, updated_by)
+               VALUES (?, 'bozza', ?, datetime('now','localtime'), ?)""",
+            (sid, user["id"], user["id"]),
+        )
+        oid = cur.lastrowid
+        for ln in lines:
+            conn.execute(
+                """INSERT INTO order_lines (order_id, product_id, description, unit, quantity)
+                   VALUES (?,?,?,?,?)""",
+                (oid, ln["product_id"], ln["description"], ln["unit"] or "Kg", ln["quantity"]),
+            )
+    audit(user, "repeat_last_order", "order", oid, f"from={last['id']} supplier={sid}")
+    return ok({"id": oid, "copied_from": last["id"], "lines": len(lines)})
 
 
 @app.get("/api/orders/favorites/{sid}")
 def api_favorites(request: Request, sid: int):
-    require_user(request)
+    """Current user's favorite products for a supplier (admin sees own stars too)."""
+    user = require_user(request)
     with db() as conn:
         rows = conn.execute(
             """SELECT p.id, p.description, p.unit, p.default_order_unit, p.code FROM products p
-               WHERE p.supplier_id=? AND p.favorited=1 AND p.visible=1
+               JOIN user_product_favorites f ON f.product_id=p.id AND f.user_id=?
+               WHERE p.supplier_id=?
                ORDER BY p.description""",
-            (sid,),
+            (user["id"], sid),
         ).fetchall()
     return ok([dict(r) for r in rows])
 

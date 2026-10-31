@@ -226,3 +226,26 @@ a { color: var(--brand); }
 .kpi .num { color: var(--brand); }
 .cost-summary strong { color: var(--brand-2); }
 input:focus, select:focus, textarea:focus { outline:2px solid var(--brand-soft); border-color: var(--brand); }
+
+/* Ordini mobile: bigger steppers, favorites, sections */
+.prod-section {
+  font-size: .72rem; text-transform: uppercase; letter-spacing: .06em;
+  font-weight: 800; color: var(--muted); padding: 12px 0 6px;
+  border-bottom: 1px solid var(--border); margin-top: 4px;
+}
+.prod-row { gap: 8px; align-items: flex-start; }
+.fav-btn {
+  flex-shrink: 0; width: 44px; height: 44px; margin-top: 2px;
+  border: 0; border-radius: 12px; background: transparent;
+  font-size: 1.45rem; line-height: 1; color: var(--muted); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.fav-btn.on { color: var(--brand); }
+.fav-btn:active { transform: scale(1.08); }
+.stepper .step-btn {
+  width: 52px; height: 52px; border-radius: 14px; font-size: 1.6rem;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.stepper .step-qty { min-width: 42px; font-size: 1.2rem; }
+#btn-repeat-sup { font-weight: 800; min-height: 48px; }
+#btn-show-all { min-height: 44px; }

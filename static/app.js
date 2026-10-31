@@ -68,6 +68,8 @@ let draftQty = {}; // product_id -> qty
 let draftUnit = {}; // product_id -> order unit
 let draftLines = []; // full lines for fab count
 let catalogProducts = []; // current supplier catalog
+let catalogCanRepeat = false;
+let showAllProducts = false; // include items not bought in 6+ months
 
 function showOrdiniHome() {
   $("#ordini-home").classList.remove("hidden");
@@ -138,9 +140,26 @@ async function ensureDraft(sid) {
   return full;
 }
 
+
+async function refreshDraftState() {
+  if (!currentOrderId) { draftQty = {}; draftUnit = {}; draftLines = []; updateFab(); return; }
+  const full = await api(`/api/orders/${currentOrderId}`);
+  draftQty = {};
+  draftUnit = {};
+  draftLines = full.lines || [];
+  for (const l of draftLines) {
+    if (l.product_id) {
+      draftQty[l.product_id] = Number(l.quantity) || 0;
+      if (l.unit) draftUnit[l.product_id] = l.unit;
+    }
+  }
+  updateFab();
+}
+
 async function openSupplier(sid) {
   const s = suppliers.find(x => x.id === sid) || await api(`/api/suppliers/${sid}`);
   currentSupplierId = sid;
+  showAllProducts = false;
   $("#ordini-home").classList.add("hidden");
   $("#order-detail").classList.add("hidden");
   const panel = $("#supplier-panel");
@@ -148,7 +167,10 @@ async function openSupplier(sid) {
   panel.innerHTML = `<div class="card"><div class="empty">Caricamento prodotti…</div></div>`;
 
   await ensureDraft(sid);
-  catalogProducts = await api(`/api/suppliers/${sid}/products`);
+  const payload = await api(`/api/suppliers/${sid}/products`);
+  // Back-compat if API still returns a bare array
+  catalogProducts = Array.isArray(payload) ? payload : (payload.products || []);
+  catalogCanRepeat = Array.isArray(payload) ? false : !!payload.can_repeat;
 
   panel.innerHTML = `
     <div class="card sup-panel-head">
@@ -160,20 +182,45 @@ async function openSupplier(sid) {
       <div class="result-meta">
         ${esc(s.delivery_days || "—")} · limite ${esc(s.order_deadline || "—")} · min ${esc(s.min_order || "—")}
       </div>
+      <button type="button" class="btn btn-secondary btn-block" id="btn-repeat-sup"
+        style="margin-top:12px" ${catalogCanRepeat ? "" : "disabled"}
+        title="${catalogCanRepeat ? "Copia l'ultimo ordine inviato in una nuova bozza" : "Nessun ordine inviato da ripetere"}">
+        ↻ Ripeti ultimo ordine
+      </button>
       <div class="card search-bar" style="margin:12px 0 0;box-shadow:none">
         <span class="ico">🔍</span>
-        <input id="sup-filter" type="search" placeholder="Filtra prodotti…" autocomplete="off"/>
+        <input id="sup-filter" type="search" placeholder="Cerca in questo fornitore…" autocomplete="off"/>
       </div>
     </div>
     <div class="card prod-list-card">
       <p class="filter-hint" id="prod-count"></p>
       <div id="prod-list"></div>
+      <button type="button" class="btn btn-ghost btn-block" id="btn-show-all" style="margin-top:8px">Mostra tutti</button>
     </div>
     ${IS_ADMIN ? `<div id="sup-cfg-box" class="card hidden"></div>` : ""}
   `;
 
   $("#btn-back-sup").onclick = () => { showOrdiniHome(); loadOrders(); };
   $("#sup-filter").oninput = () => renderProductList($("#sup-filter").value.trim());
+  $("#btn-show-all").onclick = () => {
+    showAllProducts = !showAllProducts;
+    renderProductList($("#sup-filter").value.trim());
+  };
+  $("#btn-repeat-sup").onclick = async () => {
+    if (!catalogCanRepeat) return;
+    const btn = $("#btn-repeat-sup");
+    btn.disabled = true;
+    try {
+      const r = await api(`/api/suppliers/${sid}/repeat-last`, { method: "POST", body: "{}" });
+      currentOrderId = r.id;
+      await refreshDraftState();
+      alert(`Bozza creata con ${r.lines} prodotti dall'ultimo ordine. Puoi modificarla.`);
+      openOrder(r.id);
+    } catch (e) {
+      alert(e.message);
+      btn.disabled = false;
+    }
+  };
   renderProductList("");
   updateFab();
 
@@ -205,29 +252,113 @@ async function openSupplier(sid) {
   }
 }
 
+function monthsAgoISO(months) {
+  const d = new Date();
+  d.setMonth(d.getMonth() - months);
+  return d.toISOString().slice(0, 10);
+}
+
+function productIsStale(p, cutoff) {
+  // Favorites and recently ordered in-app always stay in the main list
+  if (p.is_favorite) return false;
+  if (p.last_ordered_at && String(p.last_ordered_at).slice(0, 10) >= cutoff) return false;
+  const inv = p.last_purchase_date ? String(p.last_purchase_date).slice(0, 10) : "";
+  if (!inv) return true; // no invoice date → tuck under Mostra tutti
+  return inv < cutoff;
+}
+
+function sortCatalogProducts(list) {
+  return [...list].sort((a, b) => {
+    const af = a.is_favorite ? 1 : 0;
+    const bf = b.is_favorite ? 1 : 0;
+    if (af !== bf) return bf - af;
+    // Recent: prefer last_ordered_at, then times_ordered, then invoice purchase_count
+    const aOrd = a.last_ordered_at ? String(a.last_ordered_at) : "";
+    const bOrd = b.last_ordered_at ? String(b.last_ordered_at) : "";
+    if (aOrd !== bOrd) return aOrd < bOrd ? 1 : -1;
+    const aFreq = (Number(a.times_ordered) || 0) * 1000 + (Number(a.purchase_count) || 0);
+    const bFreq = (Number(b.times_ordered) || 0) * 1000 + (Number(b.purchase_count) || 0);
+    const aRecent = aOrd || aFreq > 0 || (a.last_purchase_date && String(a.last_purchase_date) >= monthsAgoISO(6));
+    const bRecent = bOrd || bFreq > 0 || (b.last_purchase_date && String(b.last_purchase_date) >= monthsAgoISO(6));
+    // Among non-favorites: recently used / frequent before pure A-Z rest
+    if (!af && !bf) {
+      const aScore = (aOrd ? 2 : 0) + (aFreq > 0 ? 1 : 0);
+      const bScore = (bOrd ? 2 : 0) + (bFreq > 0 ? 1 : 0);
+      if (aScore !== bScore) return bScore - aScore;
+      if (aFreq !== bFreq && (aScore > 0 || bScore > 0)) return bFreq - aFreq;
+    }
+    return (a.description || "").localeCompare(b.description || "", "it", { sensitivity: "base" });
+  });
+}
+
 function productDefaultUnit(p) {
   return draftUnit[p.id] || p.default_order_unit || "Kg";
 }
 
 function renderProductList(filter) {
   const q = (filter || "").toLowerCase();
-  const rows = !q ? catalogProducts : catalogProducts.filter(p =>
-    (p.description || "").toLowerCase().includes(q) || (p.code || "").toLowerCase().includes(q)
-  );
-  $("#prod-count").textContent = `${rows.length} prodotti (A–Z)` + (q ? ` · filtro “${filter}”` : "");
+  const cutoff = monthsAgoISO(6);
+  let rows = catalogProducts.filter(p => {
+    if (q) {
+      const hay = `${p.description || ""} ${p.code || ""}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (!showAllProducts && productIsStale(p, cutoff)) return false;
+    return true;
+  });
+  rows = sortCatalogProducts(rows);
+  const staleCount = catalogProducts.filter(p => productIsStale(p, cutoff)).length;
+  const favCount = rows.filter(p => p.is_favorite).length;
+  const recentCount = rows.filter(p => !p.is_favorite && ((p.times_ordered || 0) > 0 || p.last_ordered_at)).length;
+
+  $("#prod-count").textContent =
+    `${rows.length} prodotti` +
+    (favCount ? ` · ${favCount} ★` : "") +
+    (recentCount ? ` · ${recentCount} recenti` : "") +
+    (q ? ` · filtro “${filter}”` : "") +
+    (!showAllProducts && staleCount ? ` · ${staleCount} nascosti (>6 mesi)` : "");
+
+  const showBtn = $("#btn-show-all");
+  if (showBtn) {
+    showBtn.textContent = showAllProducts
+      ? `Nascondi vecchi (>6 mesi)`
+      : `Mostra tutti${staleCount ? ` (${staleCount})` : ""}`;
+    showBtn.classList.toggle("hidden", staleCount === 0 && !showAllProducts);
+  }
+
   const box = $("#prod-list");
   if (!rows.length) {
-    box.innerHTML = `<div class="empty">Nessun prodotto</div>`;
+    box.innerHTML = `<div class="empty">Nessun prodotto${q ? " per questo filtro" : ""}${!showAllProducts && staleCount ? " — prova Mostra tutti" : ""}</div>`;
     return;
   }
-  box.innerHTML = rows.map(p => {
+
+  let lastSection = "";
+  const html = [];
+  for (const p of rows) {
+    let section = "Altri (A–Z)";
+    if (p.is_favorite) section = "Preferiti";
+    else if ((p.times_ordered || 0) > 0 || p.last_ordered_at) section = "Ordinati di recente";
+    else if (p.last_purchase_date && String(p.last_purchase_date).slice(0, 10) >= cutoff) section = "Acquistati di recente";
+    if (section !== lastSection) {
+      html.push(`<div class="prod-section">${section}</div>`);
+      lastSection = section;
+    }
     const qty = Number(draftQty[p.id] || 0);
     const unit = productDefaultUnit(p);
-    return `
+    const star = p.is_favorite ? "★" : "☆";
+    const metaBits = [];
+    if (IS_ADMIN && p.effective_price != null) metaBits.push(fmtPrice(p.effective_price));
+    if (p.times_ordered) metaBits.push(`${p.times_ordered}× in app`);
+    else if (p.purchase_count) metaBits.push(`${p.purchase_count}× fatt.`);
+    if (p.last_purchase_date) metaBits.push(`ult. ${fmtDate(p.last_purchase_date)}`);
+    metaBits.push(`fatt. ${p.unit || "—"}`);
+    if (IS_ADMIN && p.favorite_count) metaBits.push(`${p.favorite_count} ★ utenti`);
+    html.push(`
       <div class="prod-row" data-pid="${p.id}">
+        <button type="button" class="fav-btn ${p.is_favorite ? "on" : ""}" data-fav="${p.id}" aria-label="Preferito">${star}</button>
         <div class="prod-info">
           <div class="prod-name">${esc(p.description)}</div>
-          <div class="prod-meta">${IS_ADMIN && p.effective_price != null ? fmtPrice(p.effective_price) + " · " : ""}${p.favorited ? "★ · " : ""}fatt. ${esc(p.unit || "—")}</div>
+          <div class="prod-meta">${metaBits.map(esc).join(" · ")}</div>
           ${IS_ADMIN ? `<div class="admin-default-unit"><label>Default <select class="unit-select unit-default" data-default-pid="${p.id}">${unitOptionsHtml(p.default_order_unit || "Kg")}</select></label></div>` : ""}
         </div>
         <div class="stepper-wrap">
@@ -238,10 +369,28 @@ function renderProductList(filter) {
           </div>
           <select class="unit-select unit-line" data-unit-pid="${p.id}" aria-label="Unità di misura">${unitOptionsHtml(unit)}</select>
         </div>
-      </div>`;
-  }).join("");
+      </div>`);
+  }
+  box.innerHTML = html.join("");
+
   box.querySelectorAll(".step-btn").forEach(b => {
     b.onclick = () => bumpQty(Number(b.dataset.pid), b.dataset.act === "+" ? 1 : -1);
+  });
+  box.querySelectorAll(".fav-btn").forEach(b => {
+    b.onclick = async () => {
+      const pid = Number(b.dataset.fav);
+      const prod = catalogProducts.find(x => x.id === pid);
+      if (!prod) return;
+      const next = prod.is_favorite ? 0 : 1;
+      try {
+        await api(`/api/products/${pid}/favorite`, {
+          method: "POST",
+          body: JSON.stringify({ favorited: next }),
+        });
+        prod.is_favorite = next;
+        renderProductList($("#sup-filter")?.value.trim() || "");
+      } catch (e) { alert(e.message); }
+    };
   });
   box.querySelectorAll(".unit-line").forEach(sel => {
     sel.onchange = () => changeLineUnit(Number(sel.dataset.unitPid), sel.value);
@@ -256,7 +405,6 @@ function renderProductList(filter) {
         });
         const prod = catalogProducts.find(x => x.id === pid);
         if (prod) prod.default_order_unit = sel.value;
-        // If line has no qty yet, preselect this default for the order selector
         if (!draftQty[pid]) {
           draftUnit[pid] = sel.value;
           const lineSel = box.querySelector(`.unit-line[data-unit-pid="${pid}"]`);

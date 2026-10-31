@@ -127,6 +127,13 @@ CREATE TABLE IF NOT EXISTS app_meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS user_product_favorites (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  PRIMARY KEY (user_id, product_id)
+);
 """
 
 
@@ -166,6 +173,31 @@ def _table_cols(conn, table: str) -> set[str]:
 def _migrate(conn):
     """Safe additive migrations for existing /var/data SQLite files."""
     from .units import infer_order_unit, normalize_order_unit, ORDER_UNIT_VALUES
+
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_product_favorites (
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+          PRIMARY KEY (user_id, product_id)
+        )"""
+    )
+    # One-time: copy legacy global products.favorited into each admin's favorites
+    done = conn.execute(
+        "SELECT value FROM app_meta WHERE key='migration_user_favorites'"
+    ).fetchone()
+    if not done:
+        admins = [r["id"] for r in conn.execute("SELECT id FROM users WHERE role='admin' AND active=1")]
+        favs = [r["id"] for r in conn.execute("SELECT id FROM products WHERE favorited=1")]
+        for uid in admins:
+            for pid in favs:
+                conn.execute(
+                    "INSERT OR IGNORE INTO user_product_favorites (user_id, product_id) VALUES (?,?)",
+                    (uid, pid),
+                )
+        conn.execute(
+            "INSERT OR REPLACE INTO app_meta(key, value) VALUES ('migration_user_favorites', datetime('now','localtime'))"
+        )
 
     cols = _table_cols(conn, "products")
     if "default_order_unit" not in cols:
