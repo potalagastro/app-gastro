@@ -10,6 +10,7 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -47,7 +48,21 @@ def _session_secret() -> str:
 
 _https_only = os.environ.get("HTTPS_ONLY", "1").lower() not in ("0", "false", "no")
 
+class _AssetCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path.endswith(".html") or path in ("/", "/login"):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+        elif path.startswith("/static/") and "v=" in str(request.url.query):
+            response.headers["Cache-Control"] = "public, max-age=86400"
+        elif path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 app = FastAPI(title="POTA LA GASTRO")
+app.add_middleware(_AssetCacheMiddleware)
 app.add_middleware(
     SessionMiddleware,
     secret_key=_session_secret(),

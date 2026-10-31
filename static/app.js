@@ -1,4 +1,6 @@
 /* POTA LA GASTRO frontend */
+const ASSET_V = "20";
+
 const IS_ADMIN = !!(window.PLG && window.PLG.isAdmin);
 const USER_ID = (window.PLG && window.PLG.userId) || null;
 
@@ -171,6 +173,14 @@ async function openSupplier(sid) {
   // Back-compat if API still returns a bare array
   catalogProducts = Array.isArray(payload) ? payload : (payload.products || []);
   catalogCanRepeat = Array.isArray(payload) ? false : !!payload.can_repeat;
+  // Never open an empty supplier card: if 6-month filter hides everything (or almost), show all
+  {
+    const cutoff = monthsAgoISO(6);
+    const keep = catalogProducts.filter(p => !productIsStale(p, cutoff)).length;
+    if (catalogProducts.length > 0 && keep < Math.min(3, catalogProducts.length)) {
+      showAllProducts = true;
+    }
+  }
 
   panel.innerHTML = `
     <div class="card sup-panel-head">
@@ -263,7 +273,8 @@ function productIsStale(p, cutoff) {
   if (p.is_favorite) return false;
   if (p.last_ordered_at && String(p.last_ordered_at).slice(0, 10) >= cutoff) return false;
   const inv = p.last_purchase_date ? String(p.last_purchase_date).slice(0, 10) : "";
-  if (!inv) return true; // no invoice date → tuck under Mostra tutti
+  // Missing/unparseable invoice date → KEEP visible (never hide unknowns)
+  if (!inv || inv.length < 10) return false;
   return inv < cutoff;
 }
 
@@ -306,7 +317,13 @@ function renderProductList(filter) {
     if (!showAllProducts && productIsStale(p, cutoff)) return false;
     return true;
   });
-  rows = sortCatalogProducts(rows);
+  // Safety: never leave the card empty when the catalog has products
+  if (!rows.length && catalogProducts.length && !showAllProducts && !q) {
+    showAllProducts = true;
+    rows = sortCatalogProducts(catalogProducts.slice());
+  } else {
+    rows = sortCatalogProducts(rows);
+  }
   const staleCount = catalogProducts.filter(p => productIsStale(p, cutoff)).length;
   const favCount = rows.filter(p => p.is_favorite).length;
   const recentCount = rows.filter(p => !p.is_favorite && ((p.times_ordered || 0) > 0 || p.last_ordered_at)).length;
