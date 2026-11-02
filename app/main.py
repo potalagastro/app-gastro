@@ -263,6 +263,7 @@ async def api_update_supplier(request: Request, sid: int):
         "min_order",
         "rep_name",
         "rep_whatsapp",
+        "order_message_template",
         "notes",
     ]
     with db() as conn:
@@ -833,13 +834,41 @@ def api_favorites(request: Request, sid: int):
     return ok([dict(r) for r in rows])
 
 
+def _default_order_message(rep_name: str, delivery: str, rows_txt: list[str]) -> str:
+    """Messaggio d'ordine storico (default se il fornitore non ha template)."""
+    saluto = f"Buongiorno{(' ' + rep_name) if rep_name else ''},"
+    return (
+        f"{saluto}\n\n"
+        f"Ordine POTA LA GASTRO\n"
+        f"Consegna: {delivery}\n\n"
+        + "\n".join(rows_txt)
+        + "\n\nGrazie,\nGianluca"
+    )
+
+
+def _render_order_message(template: str, *, rep_name: str, supplier_name: str, delivery: str, rows_txt: list[str]) -> str:
+    """Applica il template fornitore; segnaposto: {lista}/{prodotti}, {consegna}, {rappresentante}, {fornitore}."""
+    tpl = (template or "").strip()
+    if not tpl:
+        return _default_order_message(rep_name, delivery, rows_txt)
+    lista = "\n".join(rows_txt)
+    return (
+        tpl.replace("{lista}", lista)
+        .replace("{prodotti}", lista)
+        .replace("{consegna}", delivery)
+        .replace("{rappresentante}", rep_name or "")
+        .replace("{fornitore}", supplier_name or "")
+    )
+
+
 @app.post("/api/orders/{oid}/send")
 def api_send_order(request: Request, oid: int):
     """Admin only: mark as sent and return wa.me link."""
     admin = require_admin(request)
     with db() as conn:
         o = conn.execute(
-            """SELECT o.*, s.name AS supplier_name, s.rep_name, s.rep_whatsapp
+            """SELECT o.*, s.name AS supplier_name, s.rep_name, s.rep_whatsapp,
+                      COALESCE(s.order_message_template, '') AS order_message_template
                FROM orders o JOIN suppliers s ON s.id=o.supplier_id WHERE o.id=?""",
             (oid,),
         ).fetchone()
@@ -860,7 +889,6 @@ def api_send_order(request: Request, oid: int):
             return err("Numero WhatsApp del rappresentante non configurato")
 
         delivery = o["delivery_date"] or "da concordare"
-        saluto = f"Buongiorno{(' ' + o['rep_name']) if o['rep_name'] else ''},"
         rows_txt = []
         for ln in lines:
             q = ln["quantity"]
@@ -871,12 +899,12 @@ def api_send_order(request: Request, oid: int):
                 rows_txt.append(f"- {qstr} {unit} {ln['description']}")
             else:
                 rows_txt.append(f"- {qstr} {ln['description']}")
-        msg = (
-            f"{saluto}\n\n"
-            f"Ordine POTA LA GASTRO\n"
-            f"Consegna: {delivery}\n\n"
-            + "\n".join(rows_txt)
-            + "\n\nGrazie,\nGianluca"
+        msg = _render_order_message(
+            o["order_message_template"],
+            rep_name=o["rep_name"] or "",
+            supplier_name=o["supplier_name"] or "",
+            delivery=delivery,
+            rows_txt=rows_txt,
         )
         wa = f"https://wa.me/{phone_digits}?text={quote(msg)}"
         conn.execute(

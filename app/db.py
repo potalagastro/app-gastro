@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS suppliers (
   min_order TEXT DEFAULT '',
   rep_name TEXT DEFAULT '',
   rep_whatsapp TEXT DEFAULT '',
+  order_message_template TEXT DEFAULT '',
   notes TEXT DEFAULT '',
   updated_at TEXT,
   updated_by INTEGER
@@ -197,6 +198,14 @@ def _migrate(conn):
                 )
         conn.execute(
             "INSERT OR REPLACE INTO app_meta(key, value) VALUES ('migration_user_favorites', datetime('now','localtime'))"
+        )
+
+
+    # Supplier WhatsApp order message template (per-fornitore)
+    scol = _table_cols(conn, "suppliers")
+    if "order_message_template" not in scol:
+        conn.execute(
+            "ALTER TABLE suppliers ADD COLUMN order_message_template TEXT DEFAULT ''"
         )
 
     cols = _table_cols(conn, "products")

@@ -1,5 +1,5 @@
 /* POTA LA GASTRO frontend */
-const ASSET_V = "20";
+const ASSET_V = "21";
 
 const IS_ADMIN = !!(window.PLG && window.PLG.isAdmin);
 const USER_ID = (window.PLG && window.PLG.userId) || null;
@@ -207,7 +207,6 @@ async function openSupplier(sid) {
       <div id="prod-list"></div>
       <button type="button" class="btn btn-ghost btn-block" id="btn-show-all" style="margin-top:8px">Mostra tutti</button>
     </div>
-    ${IS_ADMIN ? `<div id="sup-cfg-box" class="card hidden"></div>` : ""}
   `;
 
   $("#btn-back-sup").onclick = () => { showOrdiniHome(); loadOrders(); };
@@ -235,31 +234,90 @@ async function openSupplier(sid) {
   updateFab();
 
   if (IS_ADMIN && $("#btn-cfg-sup")) {
-    $("#btn-cfg-sup").onclick = () => {
-      const box = $("#sup-cfg-box");
-      box.classList.toggle("hidden");
-      if (!box.classList.contains("hidden")) {
-        box.innerHTML = `
-          <h3>Configura fornitore</h3>
-          <form id="sup-cfg" class="stack">
-            <label>Giorni consegna <input name="delivery_days" value="${esc(s.delivery_days || "")}"/></label>
-            <label>Orario limite <input name="order_deadline" value="${esc(s.order_deadline || "")}"/></label>
-            <label>Ordine minimo <input name="min_order" value="${esc(s.min_order || "")}"/></label>
-            <label>Nome rappresentante <input name="rep_name" value="${esc(s.rep_name || "")}"/></label>
-            <label>WhatsApp (es. 393331234567) <input name="rep_whatsapp" value="${esc(s.rep_whatsapp || "")}"/></label>
-            <button class="btn btn-secondary" type="submit">Salva</button>
-          </form>`;
-        $("#sup-cfg").onsubmit = async (e) => {
-          e.preventDefault();
-          const fd = new FormData(e.target);
-          await api(`/api/suppliers/${sid}`, { method: "PUT", body: JSON.stringify(Object.fromEntries(fd.entries())) });
-          await loadSuppliers();
-          alert("Configurazione salvata");
-          openSupplier(sid);
-        };
-      }
-    };
+    $("#btn-cfg-sup").onclick = () => openSupplierConfig(sid);
   }
+}
+
+
+function closeSupplierConfigModal() {
+  const m = $("#sup-cfg-modal");
+  if (m) m.remove();
+}
+
+async function openSupplierConfig(sid) {
+  closeSupplierConfigModal();
+  let s = suppliers.find(x => x.id === sid);
+  try {
+    s = await api(`/api/suppliers/${sid}`);
+  } catch (e) {
+    alert(e.message || "Impossibile caricare il fornitore");
+    return;
+  }
+  const modal = document.createElement("div");
+  modal.id = "sup-cfg-modal";
+  modal.className = "modal-overlay";
+  modal.innerHTML = `
+    <div class="modal-sheet" role="dialog" aria-modal="true" aria-labelledby="sup-cfg-title">
+      <div class="modal-sheet-head">
+        <h3 id="sup-cfg-title">Configura fornitore</h3>
+        <button type="button" class="btn btn-sm btn-ghost" id="sup-cfg-close" aria-label="Chiudi">✕</button>
+      </div>
+      <p class="muted" style="margin:0 0 10px">${esc(s.name || "")}</p>
+      <form id="sup-cfg" class="stack">
+        <label>Telefono WhatsApp rappresentante
+          <input name="rep_whatsapp" inputmode="tel" autocomplete="tel"
+            placeholder="es. 393331234567"
+            value="${esc(s.rep_whatsapp || "")}"/>
+        </label>
+        <label>Nome rappresentante
+          <input name="rep_name" value="${esc(s.rep_name || "")}" placeholder="opzionale"/>
+        </label>
+        <label>Testo messaggio d'ordine
+          <textarea name="order_message_template" rows="8"
+            placeholder="Usa {lista} per i prodotti…">${esc(s.order_message_template || "")}</textarea>
+        </label>
+        <p class="muted" style="font-size:.78rem;margin:0">
+          Segnaposto: <code>{lista}</code> (prodotti), <code>{consegna}</code>,
+          <code>{rappresentante}</code>, <code>{fornitore}</code>.
+          Se lasci vuoto si usa il messaggio standard.
+        </p>
+        <label>Giorni di consegna
+          <input name="delivery_days" value="${esc(s.delivery_days || "")}" placeholder="es. Lun, Mer, Ven"/>
+        </label>
+        <label>Orario limite
+          <input name="order_deadline" value="${esc(s.order_deadline || "")}" placeholder="es. 11:00"/>
+        </label>
+        <label>Minimo d'ordine
+          <input name="min_order" value="${esc(s.min_order || "")}" placeholder="es. €50 / 2 cartoni"/>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" id="sup-cfg-cancel">Annulla</button>
+          <button class="btn btn-primary" type="submit">Salva</button>
+        </div>
+      </form>
+    </div>`;
+  document.body.appendChild(modal);
+  const close = () => closeSupplierConfigModal();
+  $("#sup-cfg-close", modal).onclick = close;
+  $("#sup-cfg-cancel", modal).onclick = close;
+  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+  $("#sup-cfg", modal).onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const payload = Object.fromEntries(fd.entries());
+    const btn = e.target.querySelector('button[type="submit"]');
+    if (btn) btn.disabled = true;
+    try {
+      await api(`/api/suppliers/${sid}`, { method: "PUT", body: JSON.stringify(payload) });
+      await loadSuppliers();
+      close();
+      alert("Configurazione salvata");
+      await openSupplier(sid);
+    } catch (err) {
+      alert(err.message || "Salvataggio non riuscito");
+      if (btn) btn.disabled = false;
+    }
+  };
 }
 
 function monthsAgoISO(months) {
