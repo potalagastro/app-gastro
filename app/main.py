@@ -847,18 +847,28 @@ def _default_order_message(rep_name: str, delivery: str, rows_txt: list[str]) ->
 
 
 def _render_order_message(template: str, *, rep_name: str, supplier_name: str, delivery: str, rows_txt: list[str]) -> str:
-    """Applica il template fornitore; segnaposto: {lista}/{prodotti}, {consegna}, {rappresentante}, {fornitore}."""
+    """Applica il template fornitore; segnaposto: {lista}/{prodotti}, {consegna}, {rappresentante}, {fornitore}.
+
+    Template vuoto/solo spazi → messaggio storico completo.
+    Se il template non include {lista} né {prodotti}, la lista prodotti viene
+    sempre aggiunta in fondo (così un saluto tipo "Ciao Fabio" non perde l'ordine).
+    """
     tpl = (template or "").strip()
     if not tpl:
         return _default_order_message(rep_name, delivery, rows_txt)
     lista = "\n".join(rows_txt)
-    return (
+    has_list_placeholder = ("{lista}" in tpl) or ("{prodotti}" in tpl)
+    msg = (
         tpl.replace("{lista}", lista)
         .replace("{prodotti}", lista)
         .replace("{consegna}", delivery)
         .replace("{rappresentante}", rep_name or "")
         .replace("{fornitore}", supplier_name or "")
     )
+    if not has_list_placeholder and rows_txt:
+        # Evita doppio a capo se il template finisce già con newline
+        msg = msg.rstrip() + "\n\n" + lista
+    return msg
 
 
 @app.post("/api/orders/{oid}/send")

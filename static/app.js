@@ -1,5 +1,5 @@
 /* POTA LA GASTRO frontend */
-const ASSET_V = "21";
+const ASSET_V = "22";
 
 const IS_ADMIN = !!(window.PLG && window.PLG.isAdmin);
 const USER_ID = (window.PLG && window.PLG.userId) || null;
@@ -272,14 +272,15 @@ async function openSupplierConfig(sid) {
         <label>Nome rappresentante
           <input name="rep_name" value="${esc(s.rep_name || "")}" placeholder="opzionale"/>
         </label>
-        <label>Testo messaggio d'ordine
+        <label>Testo messaggio d'ordine (opzionale)
           <textarea name="order_message_template" rows="8"
-            placeholder="Usa {lista} per i prodotti…">${esc(s.order_message_template || "")}</textarea>
+            placeholder="Lascia vuoto per il messaggio standard, oppure scrivi un saluto / testo e usa {lista}">${esc(s.order_message_template || "")}</textarea>
         </label>
         <p class="muted" style="font-size:.78rem;margin:0">
-          Segnaposto: <code>{lista}</code> (prodotti), <code>{consegna}</code>,
+          Lascia vuoto = messaggio completo con prodotti. Segnaposto:
+          <code>{lista}</code> / <code>{prodotti}</code>, <code>{consegna}</code>,
           <code>{rappresentante}</code>, <code>{fornitore}</code>.
-          Se lasci vuoto si usa il messaggio standard.
+          Se non metti <code>{lista}</code>, i prodotti vengono aggiunti in fondo.
         </p>
         <label>Giorni di consegna
           <input name="delivery_days" value="${esc(s.delivery_days || "")}" placeholder="es. Lun, Mer, Ven"/>
