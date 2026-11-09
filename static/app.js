@@ -1,5 +1,5 @@
 /* POTA LA GASTRO frontend */
-const ASSET_V = "22";
+const ASSET_V = "24";
 
 const IS_ADMIN = !!(window.PLG && window.PLG.isAdmin);
 const USER_ID = (window.PLG && window.PLG.userId) || null;
@@ -55,7 +55,13 @@ $all(".tab").forEach(btn => {
     btn.classList.add("active");
     $(`#page-${btn.dataset.tab}`).classList.add("active");
     if (btn.dataset.tab === "ordini") { showOrdiniHome(); loadOrders(); }
-    if (btn.dataset.tab === "foodcost") loadRecipes();
+    if (btn.dataset.tab === "foodcost") {
+      $("#page-foodcost").classList.remove("fc-focus");
+      $("#recipe-detail").classList.add("hidden");
+      $("#recipe-form").classList.add("hidden");
+      $("#recipes-list").classList.remove("hidden");
+      loadRecipes();
+    }
     if (btn.dataset.tab === "admin") loadAdmin();
   });
 });
@@ -735,6 +741,64 @@ async function openOrder(oid) {
   }
 }
 
+function fmtPieces(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x) || x <= 0) return "";
+  if (Math.abs(x - Math.round(x)) < 1e-6) return String(Math.round(x));
+  return x.toLocaleString("it-IT", { maximumFractionDigits: 2 });
+}
+
+function pieceWeightG(yieldQty, yieldUnit, pieces) {
+  const p = Number(pieces);
+  const q = Number(yieldQty);
+  if (!(p > 0) || !(q > 0)) return null;
+  const u = String(yieldUnit || "kg").toLowerCase();
+  const grams = (u === "g" || u === "gr" || u === "ml") ? q : q * 1000;
+  return grams / p;
+}
+
+function fmtGrams(g) {
+  if (g == null || !Number.isFinite(Number(g))) return "";
+  const n = Number(g);
+  if (n >= 1000) {
+    const kg = n / 1000;
+    const rounded = Math.abs(kg - Math.round(kg)) < 0.0005 ? Math.round(kg) : Math.round(kg * 1000) / 1000;
+    const txt = Number.isInteger(rounded)
+      ? String(rounded)
+      : rounded.toLocaleString("it-IT", { maximumFractionDigits: 3 });
+    return `${txt} kg`;
+  }
+  const rounded = Math.abs(n - Math.round(n)) < 0.05 ? Math.round(n) : Math.round(n * 10) / 10;
+  const txt = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1).replace(".", ",");
+  return `${txt} g`;
+}
+
+function piecesInputValue(v) {
+  if (v == null || v === "" || !(Number(v) > 0)) return "";
+  const x = Number(v);
+  if (Math.abs(x - Math.round(x)) < 1e-6) return String(Math.round(x));
+  return String(x);
+}
+
+function recipeYieldLabel(r) {
+  const base = `prodotto finito ${fmtQty(r.yield_qty)} ${r.yield_unit || "kg"}`;
+  const g = pieceWeightG(r.yield_qty, r.yield_unit, r.yield_pieces);
+  if (g == null) return base;
+  return `${base} · ${fmtPieces(r.yield_pieces)} pezzi (${fmtGrams(g)}/pz)`;
+}
+
+function formatIngQty(i) {
+  const unit = String(i.unit || "").toLowerCase();
+  if (unit === "pz") {
+    const each = i.piece_weight_g != null ? Number(i.piece_weight_g) : null;
+    const tot = i.weight_g != null
+      ? Number(i.weight_g)
+      : (each != null ? each * Number(i.quantity) : null);
+    return `${fmtQty(i.quantity)} pz${tot != null ? ` · ${fmtGrams(tot)}` : ""}`;
+  }
+  return `${fmtQty(i.quantity)} ${i.unit || ""}`;
+}
+
 // ─── FOOD COST ──────────────────────────────────────────
 let recipeListCache = [];
 let previewTimer = null;
@@ -749,7 +813,7 @@ async function loadRecipes() {
     <div class="list-item" style="cursor:pointer" data-rid="${r.id}">
       <div>
         <div class="title">${esc(r.name)}</div>
-        <div class="result-meta">${esc(r.category || "—")} · prodotto finito ${r.yield_qty} ${esc(r.yield_unit)}</div>
+        <div class="result-meta">${esc(r.category || "—")} · ${esc(recipeYieldLabel(r))}</div>
       </div>
       <span class="badge">Apri</span>
     </div>`).join("");
@@ -761,26 +825,49 @@ $("#btn-new-recipe").onclick = () => showRecipeForm(null);
 async function openRecipe(rid) {
   const r = await api(`/api/recipes/${rid}`);
   $("#recipe-form").classList.add("hidden");
+  $("#recipes-list").classList.add("hidden");
+  $("#page-foodcost").classList.add("fc-focus");
   const box = $("#recipe-detail");
   box.classList.remove("hidden");
   const c = r.cost || {};
-  const ings = (c.ingredients || []).map(i =>
-    `<div class="line-item"><div><div class="title">${esc(i.name)}</div>
-      <div class="result-meta">${i.kind === "recipe" ? "sottoricetta" : "prodotto"}</div></div>
-      <div>${i.quantity} ${esc(i.unit)}${IS_ADMIN && i.line_cost != null ? ` · ${fmtPrice(i.line_cost)}` : ""}</div></div>`
-  ).join("");
+  const nPieces = (r.yield_pieces != null && Number(r.yield_pieces) > 0)
+    ? Number(r.yield_pieces)
+    : (c.yield_pieces != null && Number(c.yield_pieces) > 0 ? Number(c.yield_pieces) : null);
+  const pieceG = c.piece_weight_g != null
+    ? Number(c.piece_weight_g)
+    : pieceWeightG(r.yield_qty, r.yield_unit, nPieces);
+  const showPiece = nPieces != null && pieceG != null;
+  const showCost = IS_ADMIN && c.cost_per_kg != null;
+  const formula = showPiece
+    ? `${fmtQty(r.yield_qty)} ${esc(r.yield_unit)} ÷ ${fmtPieces(nPieces)} = ${fmtGrams(pieceG)} a pezzo`
+    : "";
+  const ings = (c.ingredients || []).map(i => {
+    const unit = String(i.unit || "").toLowerCase();
+    const kind = i.kind === "recipe" ? "sottoricetta" : "prodotto";
+    const pieceMeta = unit === "pz" && i.piece_weight_g != null ? ` · ${fmtGrams(i.piece_weight_g)} a pezzo` : "";
+    return `<div class="line-item"><div><div class="title">${esc(i.name)}</div>
+      <div class="result-meta">${kind}${pieceMeta}</div></div>
+      <div class="ing-qty-out">${formatIngQty(i)}${IS_ADMIN && i.line_cost != null ? ` · ${fmtPrice(i.line_cost)}` : ""}</div></div>`;
+  }).join("");
+  const summary = (showPiece || showCost) ? `
+        <div class="cost-summary card" style="background:var(--green-soft);margin:12px 0;box-shadow:none">
+          ${showPiece ? `
+          <div class="row-between"><span>Pezzi ottenuti</span><strong>${fmtPieces(nPieces)}</strong></div>
+          <div class="row-between" style="margin-top:6px"><span>Peso di un pezzo</span><strong>${fmtGrams(pieceG)}</strong></div>
+          <div class="piece-formula">${formula}</div>` : ""}
+          ${showCost ? `
+          <div class="row-between" style="margin-top:${showPiece ? 10 : 0}px"><span>Costo totale</span><strong>${fmtPrice(c.total_cost != null ? c.total_cost : (c.cost_per_kg * (c.yield_kg || r.yield_qty)))}</strong></div>
+          <div class="row-between" style="margin-top:6px"><span>Costo / kg</span><strong>${fmtPrice(c.cost_per_kg)}</strong></div>
+          ${c.cost_per_piece != null ? `<div class="row-between" style="margin-top:6px"><span>Costo / pezzo</span><strong>${fmtPrice(c.cost_per_piece)}</strong></div>` : ""}
+          ${c.sell_price != null ? `<div class="row-between" style="margin-top:6px"><span>Vendita</span><strong>${fmtPrice(c.sell_price)}</strong></div>` : ""}
+          ${c.food_cost_pct != null ? `<div class="row-between" style="margin-top:6px"><span>Food cost</span><strong>${c.food_cost_pct.toFixed(1)}% ${c.traffic_light ? `<span class="semaforo ${c.traffic_light}"></span>` : ""}</strong></div>` : ""}` : ""}
+        </div>` : "";
   box.innerHTML = `
     <div class="card">
       <div class="row-between"><h2 style="margin:0">${esc(r.name)}</h2>
         <button class="btn btn-sm btn-ghost" id="btn-back-rec">← Elenco</button></div>
-      <div class="result-meta">${esc(r.category || "")} · prodotto finito ${r.yield_qty} ${esc(r.yield_unit)}</div>
-      ${IS_ADMIN && c.cost_per_kg != null ? `
-        <div class="cost-summary card" style="background:var(--green-soft);margin:12px 0;box-shadow:none">
-          <div class="row-between"><span>Costo totale</span><strong>${fmtPrice(c.total_cost != null ? c.total_cost : (c.cost_per_kg * (c.yield_kg || r.yield_qty)))}</strong></div>
-          <div class="row-between" style="margin-top:6px"><span>Costo / kg</span><strong>${fmtPrice(c.cost_per_kg)}</strong></div>
-          ${c.sell_price != null ? `<div class="row-between" style="margin-top:6px"><span>Vendita</span><strong>${fmtPrice(c.sell_price)}</strong></div>` : ""}
-          ${c.food_cost_pct != null ? `<div class="row-between" style="margin-top:6px"><span>Food cost</span><strong>${c.food_cost_pct.toFixed(1)}% ${c.traffic_light ? `<span class="semaforo ${c.traffic_light}"></span>` : ""}</strong></div>` : ""}
-        </div>` : ""}
+      <div class="result-meta">${[r.category, recipeYieldLabel(r)].filter(Boolean).map(esc).join(" · ")}</div>
+      ${summary}
       <div class="section-title">Ingredienti</div>
       ${ings || '<div class="empty">Nessun ingrediente</div>'}
       <div class="section-title">Scala produzione</div>
@@ -796,12 +883,18 @@ async function openRecipe(rid) {
         <button class="btn btn-sm btn-secondary" id="btn-edit-rec">Modifica</button>
       </div>
     </div>`;
-  $("#btn-back-rec").onclick = () => { box.classList.add("hidden"); loadRecipes(); };
+  $("#btn-back-rec").onclick = () => {
+    box.classList.add("hidden");
+    $("#page-foodcost").classList.remove("fc-focus");
+    $("#recipes-list").classList.remove("hidden");
+    loadRecipes();
+  };
+  window.scrollTo({ top: 0, behavior: "auto" });
   $("#btn-scale").onclick = async () => {
     const kg = Number($("#scale-kg").value);
     const sc = await api(`/api/recipes/${rid}/scale?kg=${kg}`);
     $("#scale-out").innerHTML = `<div class="card" style="background:#f7faf8"><strong>Scheda per ${kg} kg</strong>
-      ${sc.ingredients.map(i => `<div class="line-item"><div>${esc(i.name)}</div><div>${i.quantity} ${esc(i.unit)}</div></div>`).join("")}
+      ${sc.ingredients.map(i => `<div class="line-item"><div>${esc(i.name)}</div><div>${formatIngQty(i)}</div></div>`).join("")}
       </div>`;
   };
   $("#btn-print").onclick = () => {
@@ -814,6 +907,8 @@ async function openRecipe(rid) {
 function showRecipeForm(existing) {
   $("#recipe-detail").classList.add("hidden");
   $("#recipes-list").classList.add("hidden");
+  $("#page-foodcost").classList.add("fc-focus");
+  window.scrollTo({ top: 0, behavior: "auto" });
   const box = $("#recipe-form");
   box.classList.remove("hidden");
   const ings = existing ? (existing.ingredients_raw || []) : [];
@@ -842,17 +937,21 @@ function showRecipeForm(existing) {
 
       <div class="card fc-step">
         <div class="section-title" style="margin-top:0">3 · Prodotto finito</div>
-        <div class="row">
-          <label style="flex:1">Peso totale finale
-            <input name="yield_qty" type="number" step="any" min="0.001" required value="${existing?.yield_qty ?? ""}" placeholder="Es. 5"/>
+        <div class="row yield-row">
+          <label class="yield-qty">Peso totale finale
+            <input name="yield_qty" type="number" inputmode="decimal" step="any" min="0.001" required value="${existing?.yield_qty ?? ""}" placeholder="Es. 2"/>
           </label>
-          <label style="width:100px">Unità
+          <label class="yield-unit">Unità
             <select name="yield_unit">
               ${["kg","g"].map(u => `<option ${((existing?.yield_unit||"kg")===u)?"selected":""}>${u}</option>`).join("")}
             </select>
           </label>
         </div>
-        <p class="muted" style="margin:8px 0 0;font-size:.8rem">Quanto pesa il prodotto finito dopo la preparazione.</p>
+        <label style="margin-top:10px">Numero di pezzi (facoltativo)
+          <input name="yield_pieces" type="number" inputmode="decimal" step="any" min="0" value="${piecesInputValue(existing?.yield_pieces)}" placeholder="Es. 25 — lascia vuoto se non serve"/>
+        </label>
+        <p class="muted" style="margin:8px 0 0;font-size:.8rem">Peso del prodotto finito. Se indichi anche i pezzi, l'app calcola quanto pesa un pezzo e il costo a pezzo. Quella ricetta si può poi usare anche in pezzi.</p>
+        <div id="piece-live" class="piece-live hidden"></div>
       </div>
 
       ${IS_ADMIN ? `
@@ -870,7 +969,7 @@ function showRecipeForm(existing) {
         </div>
       </details>` : `
       <div class="card fc-step">
-        <div class="muted" style="font-size:.9rem">I prezzi sono visibili solo all'admin. Tu puoi inserire ricetta e pesi.</div>
+        <div class="muted" style="font-size:.9rem">I prezzi sono visibili solo all'admin. Tu puoi inserire ricetta, pesi e, se serve, i pezzi.</div>
       </div>`}
 
       <button class="btn btn-primary btn-block" type="submit" style="min-height:52px;font-size:1.05rem">Salva ricetta</button>
@@ -892,19 +991,47 @@ function showRecipeForm(existing) {
     }).filter(i => i.name && i.quantity > 0);
   }
 
+  function readYieldPieces() {
+    const raw = (form.yield_pieces?.value || "").trim().replace(",", ".");
+    if (!raw) return { value: null, error: null };
+    const n = Number(raw);
+    if (!(n > 0)) return { value: null, error: "Il numero di pezzi deve essere maggiore di zero, oppure lascia il campo vuoto." };
+    return { value: n, error: null };
+  }
+
   function schedulePreview() {
+    updatePieceLive();
     if (!IS_ADMIN) return;
     clearTimeout(previewTimer);
     previewTimer = setTimeout(runPreview, 350);
   }
 
+  function updatePieceLive() {
+    const el = $("#piece-live");
+    if (!el) return;
+    const parsed = readYieldPieces();
+    const g = parsed.error ? null : pieceWeightG(form.yield_qty.value, form.yield_unit.value, parsed.value);
+    if (g == null) {
+      el.classList.add("hidden");
+      el.textContent = parsed.error || "";
+      if (parsed.error) el.classList.remove("hidden");
+      return;
+    }
+    el.classList.remove("hidden");
+    el.textContent = `Un pezzo pesa ${fmtGrams(g)} (${fmtQty(form.yield_qty.value)} ${form.yield_unit.value} ÷ ${fmtPieces(parsed.value)} pezzi).`;
+  }
+
   async function runPreview() {
     const bodyEl = $("#cost-preview-body");
     if (!bodyEl) return;
-    const form = $("#rec-form");
     const yield_qty = Number(form.yield_qty.value);
     const yield_unit = form.yield_unit.value;
+    const parsed = readYieldPieces();
     const ingredients = collectIngredients();
+    if (parsed.error) {
+      bodyEl.innerHTML = `<span class="muted">${esc(parsed.error)}</span>`;
+      return;
+    }
     if (!ingredients.length || !yield_qty) {
       bodyEl.innerHTML = `<span class="muted">Aggiungi ingredienti e peso finale per vedere il costo.</span>`;
       return;
@@ -918,12 +1045,16 @@ function showRecipeForm(existing) {
       };
       const r = await api("/api/recipes/preview-cost", {
         method: "POST",
-        body: JSON.stringify({ yield_qty, yield_unit, ingredients, ...extras }),
+        body: JSON.stringify({ yield_qty, yield_unit, yield_pieces: parsed.value, ingredients, ...extras }),
       });
+      const noteList = (r.ingredients || []).filter(i => i.note).map(i => `${i.name}: ${i.note}`);
+      const notes = noteList.length ? ` ${noteList.join(" · ")}` : "";
       bodyEl.innerHTML = `
         <div class="row-between"><span>Costo totale</span><strong style="font-size:1.15rem">${fmtPrice(r.total_cost)}</strong></div>
         <div class="row-between" style="margin-top:8px"><span>Costo / kg</span><strong style="font-size:1.15rem;color:var(--green)">${fmtPrice(r.cost_per_kg)}</strong></div>
-        ${r.has_missing_prices ? `<p class="muted" style="margin:8px 0 0;font-size:.8rem">⚠ Alcuni ingredienti senza prezzo</p>` : ""}
+        ${r.cost_per_piece != null ? `<div class="row-between" style="margin-top:8px"><span>Costo / pezzo${r.piece_weight_g != null ? ` (${fmtGrams(r.piece_weight_g)})` : ""}</span><strong style="font-size:1.15rem;color:var(--green)">${fmtPrice(r.cost_per_piece)}</strong></div>` : ""}
+        ${r.piece_weight_g != null ? `<p class="piece-formula">${fmtQty(yield_qty)} ${esc(yield_unit)} ÷ ${fmtPieces(r.yield_pieces)} = ${fmtGrams(r.piece_weight_g)} a pezzo</p>` : ""}
+        ${r.has_missing_prices ? `<p class="muted" style="margin:8px 0 0;font-size:.8rem">⚠ Alcuni ingredienti senza prezzo${esc(notes)}</p>` : (notes ? `<p class="muted" style="margin:8px 0 0;font-size:.8rem">⚠ ${esc(notes)}</p>` : "")}
       `;
     } catch (e) {
       bodyEl.innerHTML = `<span class="alert alert-error">${esc(e.message)}</span>`;
@@ -944,18 +1075,19 @@ function showRecipeForm(existing) {
       </label>
       <input type="hidden" name="ing_name" value="${esc(ing.name || "")}"/>
       <div class="pick-results hidden"></div>
-      <div class="row" style="margin-top:8px;align-items:flex-end">
-        <label style="flex:1">Peso
-          <input name="ing_qty" type="number" step="any" min="0" value="${ing.quantity ?? ""}" placeholder="0" required/>
+      <div class="ing-qty-row">
+        <label class="ing-qty"><span class="ing-qty-label">Peso</span>
+          <input name="ing_qty" type="number" inputmode="decimal" step="any" min="0" value="${ing.quantity ?? ""}" placeholder="0" required/>
         </label>
-        <label style="width:90px">Unità
-          <select name="ing_unit">${["kg","g"].map(u => `<option ${(ing.unit||"kg")===u?"selected":""}>${u}</option>`).join("")}</select>
+        <label class="ing-unit">Unità
+          <select name="ing_unit"></select>
         </label>
         <button type="button" class="btn btn-sm btn-danger rm" title="Rimuovi">✕</button>
       </div>
       <div class="ing-picked muted" style="font-size:.75rem;margin-top:6px">
         ${ing.name ? (kind === "recipe" ? "Sottoricetta: " : "Catalogo: ") + esc(ing.name) : "Cerca e scegli un ingrediente"}
-      </div>`;
+      </div>
+      <div class="ing-piece-hint"></div>`;
     div.querySelector(".rm").onclick = () => { div.remove(); schedulePreview(); };
 
     const searchInp = div.querySelector("[name=ing_search]");
@@ -982,9 +1114,11 @@ function showRecipeForm(existing) {
         }
         pickBox.classList.remove("hidden");
         pickBox.innerHTML =
-          (subHits.length ? `<div class="pick-group">Sottoricette</div>` + subHits.map(r =>
-            `<button type="button" class="pick-item" data-kind="recipe" data-id="${r.id}" data-name="${esc(r.name)}">${esc(r.name)} <span class="muted">ricetta</span></button>`
-          ).join("") : "") +
+          (subHits.length ? `<div class="pick-group">Sottoricette</div>` + subHits.map(r => {
+            const g = pieceWeightG(r.yield_qty, r.yield_unit, r.yield_pieces);
+            const meta = g == null ? "ricetta" : `${fmtPieces(r.yield_pieces)} pz · ${fmtGrams(g)}/pz`;
+            return `<button type="button" class="pick-item" data-kind="recipe" data-id="${r.id}" data-name="${esc(r.name)}">${esc(r.name)} <span class="muted">${meta}</span></button>`;
+          }).join("") : "") +
           (prodHits.length ? `<div class="pick-group">Catalogo</div>` + prodHits.map(p =>
             `<button type="button" class="pick-item" data-kind="product" data-id="${p.id}" data-name="${esc(p.description)}">${esc(p.description)} <span class="muted">${esc(p.supplier_name || "")}</span></button>`
           ).join("") : "");
@@ -998,6 +1132,7 @@ function showRecipeForm(existing) {
             div.querySelector(".ing-picked").textContent =
               (btn.dataset.kind === "recipe" ? "Sottoricetta: " : "Catalogo: ") + btn.dataset.name;
             pickBox.classList.add("hidden");
+            refreshIngUnit(div);
             schedulePreview();
           };
         });
@@ -1005,9 +1140,41 @@ function showRecipeForm(existing) {
     });
 
     div.querySelector("[name=ing_qty]").addEventListener("input", schedulePreview);
-    div.querySelector("[name=ing_unit]").addEventListener("change", schedulePreview);
+    div.querySelector("[name=ing_unit]").addEventListener("change", () => {
+      refreshIngUnit(div);
+      schedulePreview();
+    });
     ingBox.appendChild(div);
+    refreshIngUnit(div, ing.unit || "kg");
     if (!ing.name) searchInp.focus();
+  }
+
+  function refreshIngUnit(div, preferred) {
+    const kind = div.querySelector("[name=kind]").value;
+    const sel = div.querySelector("[name=ing_unit]");
+    const current = preferred || sel.value || "kg";
+    const subId = div.querySelector("[name=sub_recipe_id]").value;
+    const sub = recipeListCache.find(r => String(r.id) === String(subId));
+    const hasPieces = kind === "recipe" && sub && Number(sub.yield_pieces) > 0;
+    const units = ["kg", "g"];
+    if (hasPieces || current === "pz") units.push("pz");
+    const next = units.includes(current) ? current : "kg";
+    sel.innerHTML = units.map(u => `<option value="${u}" ${u === next ? "selected" : ""}>${u}</option>`).join("");
+    const label = div.querySelector(".ing-qty-label");
+    if (label) label.textContent = next === "pz" ? "Pezzi" : "Peso";
+    const hint = div.querySelector(".ing-piece-hint");
+    if (!hint) return;
+    if (next === "pz" && hasPieces) {
+      const g = pieceWeightG(sub.yield_qty, sub.yield_unit, sub.yield_pieces);
+      hint.textContent = `1 pezzo = ${fmtGrams(g)}. Il costo della riga segue questo peso.`;
+    } else if (hasPieces) {
+      const g = pieceWeightG(sub.yield_qty, sub.yield_unit, sub.yield_pieces);
+      hint.textContent = `Puoi inserirla anche in pezzi (1 = ${fmtGrams(g)}).`;
+    } else if (next === "pz") {
+      hint.textContent = "Questa ricetta non ha i pezzi: usa il peso, oppure indica i pezzi nella ricetta.";
+    } else {
+      hint.textContent = "";
+    }
   }
 
   if (ings.length) ings.forEach(addIngRow);
@@ -1016,6 +1183,7 @@ function showRecipeForm(existing) {
   $("#add-ing").onclick = () => addIngRow({});
   $("#cancel-rec").onclick = () => {
     box.classList.add("hidden");
+    $("#page-foodcost").classList.remove("fc-focus");
     $("#recipes-list").classList.remove("hidden");
     loadRecipes();
   };
@@ -1023,6 +1191,7 @@ function showRecipeForm(existing) {
   const form = $("#rec-form");
   form.yield_qty.addEventListener("input", schedulePreview);
   form.yield_unit.addEventListener("change", schedulePreview);
+  form.yield_pieces.addEventListener("input", schedulePreview);
   ["extra_condiments","extra_packaging","extra_energy_labor"].forEach(n => {
     form[n]?.addEventListener("input", schedulePreview);
   });
@@ -1048,13 +1217,29 @@ function showRecipeForm(existing) {
         alert(`Scegli “${i.name}” dai risultati di ricerca (catalogo o sottoricetta).`);
         return;
       }
+      if (i.unit === "pz" && !i.sub_recipe_id) {
+        alert(`«${i.name}» in pezzi si può usare solo come sottoricetta.`);
+        return;
+      }
+      if (i.unit === "pz") {
+        const sub = recipeListCache.find(rr => rr.id === i.sub_recipe_id);
+        if (!sub || !(Number(sub.yield_pieces) > 0)) {
+          alert(`«${i.name}» non ha il numero di pezzi. Usala a peso, oppure indica i pezzi in quella ricetta.`);
+          return;
+        }
+      }
       if (!(i.quantity > 0)) {
-        alert(`Indica il peso per “${i.name}”.`);
+        alert(i.unit === "pz" ? `Indica quanti pezzi per “${i.name}”.` : `Indica il peso per “${i.name}”.`);
         return;
       }
     }
     if (!ingredients.length) {
       alert("Aggiungi almeno un ingrediente.");
+      return;
+    }
+    const parsedPieces = readYieldPieces();
+    if (parsedPieces.error) {
+      alert(parsedPieces.error);
       return;
     }
 
@@ -1063,6 +1248,7 @@ function showRecipeForm(existing) {
       category: form.category.value.trim(),
       yield_qty: Number(form.yield_qty.value),
       yield_unit: form.yield_unit.value,
+      yield_pieces: parsedPieces.value,
       ingredients,
     };
     if (IS_ADMIN) {
@@ -1072,18 +1258,16 @@ function showRecipeForm(existing) {
       body.extra_energy_labor = Number(form.extra_energy_labor?.value || 0);
     }
     try {
+      let rid = existing ? existing.id : null;
       if (existing) {
         await api(`/api/recipes/${existing.id}`, { method: "PUT", body: JSON.stringify(body) });
-        box.classList.add("hidden");
-        $("#recipes-list").classList.remove("hidden");
-        openRecipe(existing.id);
       } else {
-        const r = await api("/api/recipes", { method: "POST", body: JSON.stringify(body) });
-        box.classList.add("hidden");
-        $("#recipes-list").classList.remove("hidden");
-        openRecipe(r.id);
+        const created = await api("/api/recipes", { method: "POST", body: JSON.stringify(body) });
+        rid = created.id;
       }
-      loadRecipes();
+      box.classList.add("hidden");
+      await loadRecipes();
+      openRecipe(rid);
     } catch (err) { alert(err.message); }
   };
 }
