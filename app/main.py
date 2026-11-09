@@ -27,7 +27,15 @@ from .auth import (
 from .catalog_import import CSV_PATH, apply_supplier_exclusions, import_catalog, is_excluded_supplier
 from .db import DB_PATH, db, init_db
 from .units import ORDER_UNITS, ORDER_UNIT_VALUES, infer_order_unit, normalize_order_unit, unit_label
-from .foodcost import compute_recipe_cost, scale_ingredients, ingredient_cost
+from .foodcost import (
+    compute_recipe_cost,
+    ingredient_cost,
+    normalize_recipe_unit,
+    parse_yield_pieces,
+    piece_metrics,
+    scale_ingredients,
+    yield_to_kg,
+)
 
 BASE = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("DATA_DIR") or (BASE / "data"))
@@ -933,7 +941,7 @@ def api_recipes(request: Request):
     require_user(request)
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, name, category, yield_qty, yield_unit, sell_price, created_at, updated_at FROM recipes ORDER BY name"
+            "SELECT id, name, category, yield_qty, yield_unit, yield_pieces, sell_price, created_at, updated_at FROM recipes ORDER BY name"
         ).fetchall()
         # weekly new recipes
         week = conn.execute(
@@ -968,16 +976,16 @@ def api_recipe(request: Request, rid: int):
         data["cost"] = cost
     else:
         # strip prices
+        # Peso del pezzo sì, prezzi no: stesso criterio di oggi sui costi.
         data["cost"] = {
             "recipe_id": rid,
             "name": cost["name"],
             "category": cost["category"],
             "yield_qty": cost["yield_qty"],
             "yield_unit": cost["yield_unit"],
-            "ingredients": [
-                {"id": i["id"], "kind": i["kind"], "name": i["name"], "quantity": i["quantity"], "unit": i["unit"]}
-                for i in cost["ingredients"]
-            ],
+            "yield_pieces": cost.get("yield_pieces"),
+            "piece_weight_g": cost.get("piece_weight_g"),
+            "ingredients": [_public_ingredient(i) for i in cost["ingredients"]],
             "notes": cost["notes"],
         }
     return ok(data)
@@ -991,10 +999,10 @@ async def api_preview_recipe_cost(request: Request):
     body = await request.json()
     yield_qty = float(body.get("yield_qty") or 0)
     yield_unit = (body.get("yield_unit") or "kg").lower()
-    if yield_unit in ("g", "gr"):
-        yield_kg = yield_qty / 1000.0
-    else:
-        yield_kg = yield_qty
+    yield_kg = yield_to_kg(yield_qty, yield_unit)
+    pieces, pieces_err = parse_yield_pieces(body.get("yield_pieces"))
+    if pieces_err:
+        return err(pieces_err)
     ingredients = body.get("ingredients") or []
     with db() as conn:
         line_costs = []
@@ -1024,9 +1032,12 @@ async def api_preview_recipe_cost(request: Request):
         )
         total += extras
         cost_per_kg = (total / yield_kg) if yield_kg > 0 else None
+        metrics = piece_metrics(yield_kg, pieces, cost_per_kg if is_admin else None)
     if not is_admin:
         return ok({
             "yield_kg": yield_kg,
+            "yield_pieces": metrics["yield_pieces"],
+            "piece_weight_g": metrics["piece_weight_g"],
             "ingredient_count": len(ingredients),
             "has_missing_prices": missing,
         })
@@ -1034,6 +1045,10 @@ async def api_preview_recipe_cost(request: Request):
         "total_cost": round(total, 4),
         "cost_per_kg": round(cost_per_kg, 4) if cost_per_kg is not None else None,
         "yield_kg": yield_kg,
+        "yield_pieces": metrics["yield_pieces"],
+        "piece_weight_g": metrics["piece_weight_g"],
+        "piece_weight_kg": metrics["piece_weight_kg"],
+        "cost_per_piece": metrics["cost_per_piece"],
         "extras": extras,
         "has_missing_prices": missing,
         "ingredients": [
@@ -1056,16 +1071,23 @@ async def api_create_recipe(request: Request):
     name = (body.get("name") or "").strip()
     if not name:
         return err("Nome obbligatorio")
+    pieces, pieces_err = parse_yield_pieces(body.get("yield_pieces"))
+    if pieces_err:
+        return err(pieces_err)
     with db() as conn:
+        msg = _validate_ingredients(conn, body.get("ingredients"))
+        if msg:
+            return err(msg)
         cur = conn.execute(
-            """INSERT INTO recipes (name, category, yield_qty, yield_unit, sell_price,
+            """INSERT INTO recipes (name, category, yield_qty, yield_unit, yield_pieces, sell_price,
                extra_condiments, extra_packaging, extra_energy_labor, notes, created_by, updated_at, updated_by)
-               VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'),?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'),?)""",
             (
                 name,
                 body.get("category") or "",
                 float(body.get("yield_qty") or 1),
                 body.get("yield_unit") or "kg",
+                pieces,
                 float(body["sell_price"]) if body.get("sell_price") not in (None, "") else None,
                 float(body.get("extra_condiments") or 0),
                 float(body.get("extra_packaging") or 0),
@@ -1082,11 +1104,65 @@ async def api_create_recipe(request: Request):
     return ok({"id": rid})
 
 
+def _public_ingredient(i: dict) -> dict:
+    """Ingredient line safe for dipendenti: quantities and piece weight, no prices."""
+    out = {
+        "id": i.get("id"),
+        "kind": i.get("kind"),
+        "name": i.get("name"),
+        "quantity": i.get("quantity"),
+        "unit": i.get("unit"),
+    }
+    if i.get("piece_weight_g") is not None:
+        out["piece_weight_g"] = i["piece_weight_g"]
+    if i.get("weight_g") is not None:
+        out["weight_g"] = i["weight_g"]
+    return out
+
+
+def _ingredient_pieces_error(conn, ing: dict) -> str | None:
+    unit = normalize_recipe_unit(ing.get("unit"))
+    if unit != "pz":
+        return None
+    name = (ing.get("name") or "").strip() or "ingrediente"
+    kind = ing.get("kind") or "product"
+    sub_id = ing.get("sub_recipe_id")
+    if kind != "recipe" or not sub_id:
+        return f"«{name}» in pezzi si può usare solo se è una ricetta che ha i pezzi indicati"
+    sub = conn.execute(
+        "SELECT name, yield_pieces FROM recipes WHERE id=?", (sub_id,)
+    ).fetchone()
+    if not sub or sub["yield_pieces"] is None or float(sub["yield_pieces"]) <= 0:
+        label = sub["name"] if sub else name
+        return (
+            f"«{label}» non ha il numero di pezzi: inseriscila a peso, "
+            "oppure indica i pezzi in quella ricetta"
+        )
+    return None
+
+
+def _used_as_pieces(conn, recipe_id: int) -> bool:
+    row = conn.execute(
+        """SELECT COUNT(*) c FROM recipe_ingredients
+           WHERE sub_recipe_id=? AND lower(unit) IN ('pz','pezzo','pezzi','pc','pcs')""",
+        (recipe_id,),
+    ).fetchone()
+    return bool(row and row["c"])
+
+
+def _validate_ingredients(conn, ingredients) -> str | None:
+    for ing in ingredients or []:
+        msg = _ingredient_pieces_error(conn, ing)
+        if msg:
+            return msg
+    return None
+
+
 def _insert_ing(conn, rid, ing, sort_order=0):
     kind = ing.get("kind") or "product"
     name = (ing.get("name") or "").strip()
     qty = float(ing.get("quantity") or 0)
-    unit = ing.get("unit") or "kg"
+    unit = normalize_recipe_unit(ing.get("unit"))
     override = ing.get("unit_cost_override")
     override = None if override in (None, "") else float(override)
     if kind == "product":
@@ -1123,8 +1199,22 @@ async def api_update_recipe(request: Request, rid: int):
         if user["role"] != "admin":
             sell = r["sell_price"]
             extras = (r["extra_condiments"], r["extra_packaging"], r["extra_energy_labor"])
+        if "yield_pieces" in body:
+            pieces, pieces_err = parse_yield_pieces(body.get("yield_pieces"))
+            if pieces_err:
+                return err(pieces_err)
+        else:
+            pieces = r["yield_pieces"]
+        if (pieces is None or float(pieces or 0) <= 0) and _used_as_pieces(conn, rid):
+            return err(
+                "Non puoi togliere i pezzi: questa ricetta è già usata in pezzi dentro un'altra ricetta."
+            )
+        if "ingredients" in body:
+            msg = _validate_ingredients(conn, body["ingredients"])
+            if msg:
+                return err(msg)
         conn.execute(
-            """UPDATE recipes SET name=?, category=?, yield_qty=?, yield_unit=?, sell_price=?,
+            """UPDATE recipes SET name=?, category=?, yield_qty=?, yield_unit=?, yield_pieces=?, sell_price=?,
                extra_condiments=?, extra_packaging=?, extra_energy_labor=?, notes=?,
                updated_at=datetime('now','localtime'), updated_by=? WHERE id=?""",
             (
@@ -1132,6 +1222,7 @@ async def api_update_recipe(request: Request, rid: int):
                 body.get("category", r["category"]) or "",
                 float(body.get("yield_qty", r["yield_qty"])),
                 body.get("yield_unit", r["yield_unit"]) or "kg",
+                pieces,
                 None if sell in (None, "") else float(sell),
                 float(extras[0] or 0),
                 float(extras[1] or 0),
@@ -1177,6 +1268,9 @@ def api_scale(request: Request, rid: int, kg: float = 1.0):
                 "quantity": i["quantity"],
                 "unit": i["unit"],
                 **({"line_cost": i.get("line_cost")} if is_admin else {}),
+                **(
+                    {k: i[k] for k in ("piece_weight_g", "weight_g") if i.get(k) is not None}
+                ),
             }
             for i in scaled
         ],

@@ -14,6 +14,98 @@ def product_unit_cost(product_row) -> float | None:
     return None
 
 
+PIECE_UNITS = frozenset({"pz", "pezzo", "pezzi", "pc", "pcs"})
+
+
+def normalize_recipe_unit(unit: str | None) -> str:
+    """Canonical unit stored on a recipe ingredient line."""
+    u = (unit or "kg").strip().lower()
+    if u in ("kg", "kgs"):
+        return "kg"
+    if u in ("g", "gr", "grammi"):
+        return "g"
+    if u in ("l", "lt"):
+        return u
+    if u == "ml":
+        return "ml"
+    if u in PIECE_UNITS:
+        return "pz"
+    return u or "kg"
+
+
+def is_piece_unit(unit: str | None) -> bool:
+    return normalize_recipe_unit(unit) == "pz"
+
+
+def yield_to_kg(qty: float, unit: str | None) -> float:
+    u = (unit or "kg").strip().lower()
+    if u in ("g", "gr", "ml"):
+        return float(qty) / 1000.0
+    return float(qty)
+
+
+def parse_yield_pieces(value) -> tuple[float | None, str | None]:
+    """Empty means 'no pieces'. Anything else must be a number greater than zero."""
+    if value is None:
+        return None, None
+    if isinstance(value, str):
+        value = value.strip().replace(",", ".")
+        if value == "":
+            return None, None
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None, "Numero di pezzi non valido"
+    if n != n or n == float("inf") or n == float("-inf"):
+        return None, "Numero di pezzi non valido"
+    if n <= 0:
+        return None, "Il numero di pezzi deve essere maggiore di zero"
+    return n, None
+
+
+def pieces_from_row(recipe) -> float | None:
+    """Read optional yield_pieces. Missing column or NULL → recipe stays weight-only."""
+    if recipe is None:
+        return None
+    try:
+        keys = recipe.keys()
+    except AttributeError:
+        return None
+    if "yield_pieces" not in keys:
+        return None
+    raw = recipe["yield_pieces"]
+    if raw is None or raw == "":
+        return None
+    try:
+        n = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return n
+
+
+def piece_metrics(yield_kg: float, pieces: float | None, cost_per_kg: float | None) -> dict[str, Any]:
+    """Weight and cost of one piece. Empty when the recipe has no piece count."""
+    out: dict[str, Any] = {
+        "yield_pieces": None,
+        "piece_weight_kg": None,
+        "piece_weight_g": None,
+        "cost_per_piece": None,
+    }
+    if pieces is None or pieces <= 0:
+        return out
+    out["yield_pieces"] = float(pieces)
+    if not yield_kg or yield_kg <= 0:
+        return out
+    piece_kg = float(yield_kg) / float(pieces)
+    out["piece_weight_kg"] = round(piece_kg, 6)
+    out["piece_weight_g"] = round(piece_kg * 1000.0, 4)
+    if cost_per_kg is not None:
+        out["cost_per_piece"] = round(float(cost_per_kg) * piece_kg, 4)
+    return out
+
+
 def convert_qty_to_kg(qty: float, unit: str) -> float:
     u = (unit or "kg").strip().lower()
     if u in ("kg", "l", "lt"):
@@ -73,6 +165,25 @@ def ingredient_cost(conn, ing: dict, visiting: set[int] | None = None) -> dict[s
         result["note"] = "ciclo ricette"
         return result
     sub = compute_recipe_cost(conn, sub_id, visiting | {sub_id})
+    if sub.get("error"):
+        result["note"] = "costo sottoricetta non calcolabile"
+        return result
+    # Pieces: cost follows the single piece (its weight and its cost), not the whole batch.
+    if is_piece_unit(unit):
+        pieces = sub.get("yield_pieces")
+        cost_per_piece = sub.get("cost_per_piece")
+        if not pieces:
+            result["note"] = "la sottoricetta non indica i pezzi"
+            return result
+        if cost_per_piece is None:
+            result["note"] = "costo sottoricetta non calcolabile"
+            return result
+        result["unit_cost"] = cost_per_piece
+        result["line_cost"] = round(float(cost_per_piece) * qty, 4)
+        result["piece_weight_g"] = sub.get("piece_weight_g")
+        if sub.get("piece_weight_g") is not None:
+            result["weight_g"] = round(float(sub["piece_weight_g"]) * qty, 4)
+        return result
     cost_per_kg = sub.get("cost_per_kg")
     if cost_per_kg is None:
         result["note"] = "costo sottoricetta non calcolabile"
@@ -83,8 +194,8 @@ def ingredient_cost(conn, ing: dict, visiting: set[int] | None = None) -> dict[s
     elif unit.lower() in ("kg", "l", "lt"):
         line = cost_per_kg * qty
     else:
-        # pz of a sub-recipe: approximate as cost_per_kg * qty (admin should use kg)
-        line = cost_per_kg * qty
+        result["note"] = "unità non riconosciuta"
+        return result
     result["unit_cost"] = cost_per_kg
     result["line_cost"] = round(line, 4)
     return result
@@ -130,6 +241,9 @@ def compute_recipe_cost(conn, recipe_id: int, visiting: set[int] | None = None) 
         # partial: still compute with known costs
         cost_per_kg = (total_cost / yield_kg) if yield_kg > 0 else None
 
+    pieces = pieces_from_row(recipe)
+    metrics = piece_metrics(yield_kg, pieces, cost_per_kg)
+
     sell = recipe["sell_price"]
     margin = None
     food_cost_pct = None
@@ -155,6 +269,10 @@ def compute_recipe_cost(conn, recipe_id: int, visiting: set[int] | None = None) 
         "yield_qty": yield_qty,
         "yield_unit": yield_unit,
         "yield_kg": yield_kg,
+        "yield_pieces": metrics["yield_pieces"],
+        "piece_weight_kg": metrics["piece_weight_kg"],
+        "piece_weight_g": metrics["piece_weight_g"],
+        "cost_per_piece": metrics["cost_per_piece"],
         "ingredients": lines,
         "ingredients_cost": round(ingredients_cost, 4),
         "extras": round(extras, 4),
@@ -182,5 +300,7 @@ def scale_ingredients(ings: list[dict], from_yield_kg: float, to_kg: float) -> l
         o["quantity"] = round(float(ing["quantity"]) * factor, 4)
         if o.get("line_cost") is not None:
             o["line_cost"] = round(float(ing["line_cost"]) * factor, 4)
+        if o.get("weight_g") is not None:
+            o["weight_g"] = round(float(ing["weight_g"]) * factor, 4)
         out.append(o)
     return out

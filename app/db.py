@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS recipes (
   category TEXT DEFAULT '',
   yield_qty REAL NOT NULL DEFAULT 1,
   yield_unit TEXT NOT NULL DEFAULT 'kg',
+  yield_pieces REAL,
   sell_price REAL,
   extra_condiments REAL DEFAULT 0,
   extra_packaging REAL DEFAULT 0,
@@ -231,6 +232,12 @@ def _migrate(conn):
         nu = normalize_order_unit(r["unit"], fallback=infer_order_unit(r["unit"], r["description"]))
         if nu != (r["unit"] or ""):
             conn.execute("UPDATE order_lines SET unit=? WHERE id=?", (nu, r["id"]))
+
+    # Optional piece count on a recipe yield. NULL = ricetta solo a peso (come prima).
+    # Additive only: existing rows stay untouched, no default that would invent pieces.
+    rcols = _table_cols(conn, "recipes")
+    if "yield_pieces" not in rcols:
+        conn.execute("ALTER TABLE recipes ADD COLUMN yield_pieces REAL")
 
     # Ensure all products have a valid canonical default
     bad = conn.execute(

@@ -168,6 +168,28 @@ input:focus, select:focus, textarea:focus { outline:2px solid var(--green-soft);
 /* Food cost mobile flow */
 .fc-flow { gap: 12px; }
 .fc-step { margin-bottom: 0; }
+.fc-flow input, .fc-flow select { min-height: 48px; font-size: 16px; }
+.yield-row { align-items: flex-end; flex-wrap: nowrap; }
+.yield-row .yield-qty { flex: 1; min-width: 0; }
+.yield-row .yield-unit { width: 88px; flex: 0 0 88px; }
+.piece-live {
+  margin-top: 8px; padding: 10px 12px; border-radius: 12px;
+  background: var(--brand-soft); color: var(--text);
+  font-weight: 800; font-size: 1rem; line-height: 1.35;
+}
+.piece-formula {
+  margin: 8px 0 0; font-size: 1.02rem; font-weight: 800;
+  color: var(--text); line-height: 1.35;
+}
+.ing-qty-row { display: flex; gap: 8px; align-items: flex-end; margin-top: 8px; }
+.ing-qty-row .ing-qty { flex: 1; min-width: 0; }
+.ing-qty-row .ing-unit { width: 84px; flex: 0 0 84px; }
+.ing-qty-row .rm { flex: 0 0 44px; width: 44px; min-height: 44px; height: 44px; padding: 0; }
+.ing-piece-hint { font-size: .8rem; margin-top: 6px; color: var(--brand-2); font-weight: 700; line-height: 1.35; }
+.ing-piece-hint:empty { display: none; }
+.ing-qty-out { text-align: right; font-weight: 700; flex-shrink: 0; max-width: 58%; }
+#page-foodcost.fc-focus .kpi,
+#page-foodcost.fc-focus .fc-list-head { display: none; }
 .ing-list { display:flex; flex-direction:column; gap:0; }
 .pick-results {
   margin-top: 6px; border:1px solid var(--border); border-radius:12px;
