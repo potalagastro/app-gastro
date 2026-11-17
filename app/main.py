@@ -26,6 +26,7 @@ from .auth import (
 )
 from .catalog_import import CSV_PATH, apply_supplier_exclusions, import_catalog, is_excluded_supplier
 from .db import DB_PATH, db, init_db
+from . import ordinia_webhook
 from .units import ORDER_UNITS, ORDER_UNIT_VALUES, infer_order_unit, normalize_order_unit, unit_label
 from .foodcost import (
     compute_recipe_cost,
@@ -70,6 +71,7 @@ class _AssetCacheMiddleware(BaseHTTPMiddleware):
 
 
 app = FastAPI(title="POTA LA GASTRO")
+app.include_router(ordinia_webhook.router)
 app.add_middleware(_AssetCacheMiddleware)
 app.add_middleware(
     SessionMiddleware,
@@ -80,6 +82,14 @@ app.add_middleware(
     max_age=60 * 60 * 24 * 14,
 )
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
+
+
+@app.on_event("startup")
+async def _ordinia_startup():
+    try:
+        ordinia_webhook.start_background()
+    except Exception as exc:  # non deve mai bloccare l'app
+        print("ordinia webhook startup:", exc, file=sys.stderr)
 
 
 @app.on_event("startup")
